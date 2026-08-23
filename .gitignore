@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Runtime data & secrets
+data/
+*.db
+*.sqlite3
+.env
+.env.*
+*.pem
+*.key
+*.crt
+
+# Misc
+.agents/
+.DS_Store

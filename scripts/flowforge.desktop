@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=FlowForge Proxy
+GenericName=Security Testing Workbench
+Comment=HTTP/HTTPS intercepting proxy & security testing workbench
+Exec=/home/jadeo/teamwork_projects/flowforge_proxy/scripts/flowforge-launch.sh
+Path=/home/jadeo/teamwork_projects/flowforge_proxy
+Icon=/home/jadeo/teamwork_projects/flowforge_proxy/scripts/flowforge.svg
+Terminal=false
+Categories=Development;Security;Network;
+Keywords=proxy;security;pentest;http;intercept;
+StartupNotify=true
