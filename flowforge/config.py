@@ -47,6 +47,25 @@ class Settings(BaseSettings):
     # CORS & Security
     cors_origins: List[str] = Field(default_factory=lambda: ["*"])
 
+    # Proposal synthesizer quality gates
+    proposal_min_severity: str = "MEDIUM"   # INFO noise never stages
+    proposal_max_per_flow: int = 12          # hard cap per intercepted flow
+    proposal_payloads_per_finding: int = 2   # curated vectors per reflection
+    proposal_header_crlf_enabled: bool = False  # CRLF response-header probes (noisy)
+
+    # Wordlist Arsenal scan roots
+    wordlist_dirs: List[str] = Field(
+        default_factory=lambda: [
+            "/usr/share/wordlists",
+            "/usr/share/seclists",
+            "/usr/share/payloadsallthethings",
+            "/usr/share/dirb/wordlists",
+            "/usr/share/wfuzz/wordlist",
+            "~/PayloadsAllTheThings-master",
+            "~/.flowforge/wordlists",
+        ]
+    )
+
     def ensure_directories(self) -> None:
         """Ensure that data and certificate directories exist on disk."""
         db_dir = Path(self.db_path).resolve().parent

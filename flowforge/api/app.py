@@ -167,6 +167,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     except ImportError:
         pass
 
+    try:
+        from flowforge.api.routes.wordlists import router as wordlists_router
+        app.include_router(wordlists_router)
+    except ImportError:
+        pass
+
+    try:
+        from flowforge.api.routes.findings import router as findings_router
+        app.include_router(findings_router)
+    except ImportError:
+        pass
+
     @app.get("/health", tags=["System"])
     @app.get("/api/v1/health", tags=["System"])
     async def health_check() -> dict:

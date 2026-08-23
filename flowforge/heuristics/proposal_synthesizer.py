@@ -8,6 +8,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
@@ -23,6 +25,7 @@ from flowforge.heuristics.models import (
     ReflectionFinding,
     TriageSummary,
 )
+from flowforge.heuristics.payload_library import get_payload_library
 from flowforge.models.flow import FlowRecord
 from flowforge.models.proposal import (
     AnomalyType,
@@ -33,29 +36,125 @@ from flowforge.models.proposal import (
 
 logger = logging.getLogger("flowforge.heuristics.proposal_synthesizer")
 
+_SEVERITY_ORDER = {
+    ProposalSeverity.INFO: 0,
+    ProposalSeverity.LOW: 1,
+    ProposalSeverity.MEDIUM: 2,
+    ProposalSeverity.HIGH: 3,
+    ProposalSeverity.CRITICAL: 4,
+}
+
+# Static assets & non-testable resource types that must never stage proposals.
+_NOISE_EXTENSIONS = {
+    ".js", ".mjs", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
+    ".ico", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".mp4", ".webm",
+    ".webp", ".avif", ".mp3", ".wav", ".wasm", ".pdf", ".zip",
+}
+_NOISE_CONTENT_TYPES = ("image/", "font/", "audio/", "video/", "text/css")
+
+# Browser-controlled / hop-by-hop headers an operator cannot set via replay.
+_UNSETTABLE_HEADERS_PREFIXES = ("sec-", ":")
+_UNSETTABLE_HEADERS = {
+    "host", "content-length", "connection", "accept-encoding",
+    "if-none-match", "if-modified-since", "transfer-encoding", "upgrade",
+}
+
+# Endpoint-level dedup so identical candidates are staged once, not per-flow.
+# Kept per-synthesizer-instance: the live engine holds one long-lived instance,
+# while API/test callers get fresh instances (and thus fresh dedup state).
+_SEEN_SIGNATURES_MAX = 50_000
+
 
 class ProposalSynthesizer:
     """
     Synthesizes actionable, contextual test candidates from intercepted traffic anomalies:
-    1. Reflection breakouts across DOM / HTML / Header contexts.
+    1. Reflection breakouts across DOM / HTML / Header contexts (curated SecLists vectors).
     2. Sequential integer IDOR / BOLA parameter boundary sweeps.
     3. Authentication header dropping, role swaps, and JWT anomalies.
     4. JSON Schema mass assignment, type confusion, and NoSQL injection.
     5. High-entropy secrets and custom heuristic rule action triggers.
+
+    Includes anti-noise gating: static assets are never synthesized, endpoint-level
+    signatures prevent duplicate staging across repeated flows, a minimum-severity
+    floor keeps INFO-level chatter out of the approval queue, and each flow is capped.
     """
 
     def __init__(self) -> None:
-        pass
+        try:
+            from flowforge.config import get_settings
+            self.settings = get_settings()
+        except Exception:
+            self.settings = None
+        self._seen_signatures: "OrderedDict[str, None]" = OrderedDict()
+
+    def _signature_seen(self, sig: str) -> bool:
+        if sig in self._seen_signatures:
+            return True
+        self._seen_signatures[sig] = None
+        if len(self._seen_signatures) > _SEEN_SIGNATURES_MAX:
+            self._seen_signatures.popitem(last=False)
+        return False
+
+    # ------------------------------------------------------------------
+    # Gating helpers
+    # ------------------------------------------------------------------
+    def _setting(self, name: str, default: Any) -> Any:
+        return getattr(self.settings, name, default) if self.settings else default
+
+    def _is_noise_flow(self, flow: FlowRecord) -> bool:
+        """True for static assets and resource fetches that are pointless to fuzz."""
+        path = ""
+        resp_ct = ""
+        method = "GET"
+        status = 200
+        if flow.request:
+            path = flow.request.path or ""
+            method = (flow.request.method or "GET").upper()
+        if flow.response:
+            resp_ct = (flow.response.content_type or "").lower()
+            status = flow.response.status_code or 0
+        ext = os.path.splitext(path.split("?")[0])[1].lower()
+        if ext in _NOISE_EXTENSIONS:
+            return True
+        if any(resp_ct.startswith(ct) for ct in _NOISE_CONTENT_TYPES):
+            return True
+        # Third-party telemetry beacons: 1x1 gifs / 204 no-content tracking pings.
+        if status in (204, 304):
+            return True
+        if method == "OPTIONS":
+            return True
+        return False
+
+    def _param_is_unsettable(self, param_name: str, param_location: str) -> bool:
+        """True when the target cannot actually be controlled during replay."""
+        name = (param_name or "").lower().strip()
+        loc = (param_location or "").lower()
+        if loc == "header":
+            if name.startswith(_UNSETTABLE_HEADERS_PREFIXES):
+                return True
+            if name in _UNSETTABLE_HEADERS:
+                return True
+        return False
+
+    def _signature(self, p: TestProposal) -> str:
+        payload_sig = hashlib.sha1(str(p.mutated_value).encode("utf-8", "replace")).hexdigest()[:12]
+        override_sig = hashlib.sha1(str(p.auth_override).encode("utf-8")).hexdigest()[:8] if p.auth_override else "-"
+        raw = f"{p.endpoint_hash}|{p.anomaly_type.value}|{p.target_param_location}|{p.target_param_name}|{payload_sig}|{override_sig}"
+        return hashlib.sha1(raw.encode()).hexdigest()
 
     def synthesize(self, flow: FlowRecord, triage: TriageSummary) -> List[TestProposal]:
         """
         Main entrypoint: evaluate all anomaly surfaces and generate deduplicated proposals.
+        Applies noise filtering, endpoint-level dedup, severity floor, and per-flow caps.
         """
+        if self._is_noise_flow(flow):
+            return []
+
         proposals: List[TestProposal] = []
         seen_keys: Set[Tuple[str, str, str, str, str]] = set()
 
         def _add(p: TestProposal) -> None:
-            # Deduplicate by (flow_id, target_param_name, target_param_location, str(mutated_value), str(auth_override))
+            # Intra-flow dedup by full tuple.
             key = (
                 p.flow_id,
                 p.target_param_name,
@@ -63,9 +162,13 @@ class ProposalSynthesizer:
                 str(p.mutated_value),
                 str(p.auth_override),
             )
-            if key not in seen_keys:
-                seen_keys.add(key)
-                proposals.append(p)
+            if key in seen_keys:
+                return
+            # Endpoint-level dedup: same candidate on same endpoint was already staged once.
+            if self._signature_seen(self._signature(p)):
+                return
+            seen_keys.add(key)
+            proposals.append(p)
 
         # 1. Synthesize Reflection Context Probes
         for p in self.synthesize_reflections(flow, triage):
@@ -90,6 +193,23 @@ class ProposalSynthesizer:
         # 6. Synthesize Custom Rule Match Probes
         for p in self.synthesize_custom_rules(flow, triage):
             _add(p)
+
+        # --- Global quality gates -------------------------------------
+        # Severity floor applies only to the historically noisy surfaces
+        # (reflections / secrets). Designed sweeps (IDOR boundaries, auth
+        # probes) are preserved in full so test matrices stay complete.
+        min_sev = ProposalSeverity(str(self._setting("proposal_min_severity", "MEDIUM")).upper())
+        noisy_types = {AnomalyType.REFLECTION, AnomalyType.SECRET_EXPOSURE}
+        proposals = [
+            p for p in proposals
+            if p.anomaly_type not in noisy_types
+            or _SEVERITY_ORDER.get(p.severity, 0) >= _SEVERITY_ORDER[min_sev]
+        ]
+
+        cap = int(self._setting("proposal_max_per_flow", 12))
+        if len(proposals) > cap:
+            proposals.sort(key=lambda p: p.confidence_score, reverse=True)
+            proposals = proposals[:cap]
 
         return proposals
 
@@ -129,6 +249,9 @@ class ProposalSynthesizer:
 
         method, host, path = self._get_path_and_host(flow)
         ep_hash = self._compute_endpoint_hash(method, host, path)
+        lib = get_payload_library()
+        payloads_per_finding = int(self._setting("proposal_payloads_per_finding", 2))
+        crlf_enabled = bool(self._setting("proposal_header_crlf_enabled", False))
 
         for r in triage.reflections:
             ctx = r.context.value if hasattr(r.context, "value") else str(r.context)
@@ -137,35 +260,27 @@ class ProposalSynthesizer:
             base_val = r.reflected_value
             sev = self._map_finding_severity(r.severity)
 
-            # Select context-specific mutation payloads
-            payloads: List[Tuple[str, str, float]] = []
+            # Never stage candidates targeting headers an operator cannot set
+            # (sec-fetch-*, sec-ch-*, hop-by-hop) — replay cannot control them.
+            if self._param_is_unsettable(param_name, param_loc):
+                continue
 
-            if ctx == ReflectionContext.HTML_SCRIPT_BLOCK.value:
-                payloads.append(("</script><script>alert(1)</script>", "Script Block Close & Re-open", 95.0))
-                payloads.append(("'-alert(1)-'", "JavaScript String Concatenation Breakout", 92.0))
-                payloads.append(("';alert(1)//", "JavaScript Statement Terminator Breakout", 90.0))
-            elif ctx in (ReflectionContext.HTML_ATTR_EVENT.value, ReflectionContext.HTML_ATTR_QUOTED.value):
-                payloads.append(('"><script>alert(1)</script>', "Quoted Attribute Tag Breakout", 95.0))
-                payloads.append(('" onfocus="alert(1)" autofocus="', "Inline Event Handler Injection", 93.0))
-            elif ctx == ReflectionContext.HTML_ATTR_UNQUOTED.value:
-                payloads.append((' x onfocus=alert(1) autofocus', "Unquoted Attribute Space Event Injection", 94.0))
-            elif ctx == ReflectionContext.HTML_ATTR_URI.value:
-                payloads.append(('javascript:alert(1)', "JavaScript Pseudo-Protocol URI Injection", 94.0))
-                payloads.append(('data:text/html,<script>alert(1)</script>', "Data URI HTML Execution", 90.0))
-            elif ctx == ReflectionContext.RESPONSE_HEADER.value:
-                payloads.append(('\r\nInjected-Header: test\r\n\r\n<script>alert(1)</script>', "CRLF Response Header Injection", 91.0))
-            elif ctx == ReflectionContext.JSON_VALUE.value:
-                payloads.append(('", "injected": "test"', "JSON String Property Breakout", 88.0))
-                payloads.append(('\\u0022', "Unicode Escaped Quote Injection", 85.0))
-            else:  # HTML_BODY_TEXT, PLAIN_TEXT, HTML_COMMENT, etc.
-                payloads.append(('<svg onload=alert(1)>', "SVG Onload Autonomous Execution", 93.0))
-                payloads.append(('<img src=x onerror=alert(1)>', "IMG Onerror DOM Execution", 90.0))
+            # Reflection into response headers is NOT an XSS sink. CRLF probing
+            # against modern stacks is near-always futile noise: disabled by default.
+            if ctx == ReflectionContext.RESPONSE_HEADER.value and not crlf_enabled:
+                continue
 
-            for mut_val, desc_suffix, conf in payloads:
+            # Curated context-specific payload selection (SecLists-backed).
+            raw_payloads = lib.get(ctx)
+            if not raw_payloads:
+                raw_payloads = lib.get("html_body_text")
+            selected = [p for p in raw_payloads[: max(1, payloads_per_finding)]]
+
+            for mut_val in selected:
                 title = f"XSS / Reflection Breakout ({param_name} in {ctx})"
                 desc = (
                     f"Parameter '{param_name}' reflects in response {r.matched_in} within {ctx} context. "
-                    f"Candidate mutation tests unencoded character boundary breakout: {desc_suffix}."
+                    "Curated vector tests unencoded character boundary breakout."
                 )
                 prop = TestProposal(
                     flow_id=flow.id,
@@ -176,13 +291,13 @@ class ProposalSynthesizer:
                     title=title,
                     description=desc,
                     severity=sev,
-                    confidence_score=conf,
+                    confidence_score=90.0,
                     target_param_name=param_name,
                     target_param_location=param_loc,
                     baseline_value=base_val,
                     mutated_value=mut_val,
                     state=ProposalState.PENDING,
-                    tags=["reflection", "xss", "dom_breakout", ctx.lower()],
+                    tags=["reflection", "xss", "dom_breakout", ctx.lower(), "curated"],
                 )
                 proposals.append(prop)
 

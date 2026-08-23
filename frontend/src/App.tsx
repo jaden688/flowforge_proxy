@@ -10,6 +10,7 @@ import { TestMatrixStaging } from './components/matrix/TestMatrixStaging';
 import { DiffViewer } from './components/diff/DiffViewer';
 import { ApiFlowGraph } from './components/graph/ApiFlowGraph';
 import { RuleEngineManager } from './components/rules/RuleEngineManager';
+import { FindingsView } from './components/findings/FindingsView';
 import { ProposalApprovalDrawer } from './components/proposals/ProposalApprovalDrawer';
 import { ProposalDiffModal } from './components/proposals/ProposalDiffModal';
 import { OperatorCockpit } from './components/cockpit/OperatorCockpit';
@@ -80,6 +81,7 @@ export const App: React.FC = () => {
       <main className="flex-1 flex flex-col min-h-0 overflow-hidden relative">
         {activeView === 'cockpit' && <OperatorCockpit />}
         {activeView === 'stream' && <LiveTrafficStream />}
+        {activeView === 'findings' && <FindingsView />}
         {activeView === 'dossier' && <TargetDossier />}
         {activeView === 'matrix' && <TestMatrixStaging />}
         {activeView === 'diff' && <DiffViewer />}

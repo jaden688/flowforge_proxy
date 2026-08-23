@@ -201,7 +201,7 @@ p {{ color: #94a3b8; font-size: 0.95rem; line-height: 1.6; margin-bottom: 1.5rem
 <div class="badge">● PROXY READY & INTERCEPTING</div>
 <h1>FLOWFORGE PROXY</h1>
 <p>Your browser is properly connected to the FlowForge Interception Engine. All HTTP/HTTPS traffic from this browser is now being analyzed, triaged, and streamed live to the Cockpit.</p>
-<a href="http://127.0.0.1:5173" class="btn">Open Operator Cockpit</a>
+<a href="http://127.0.0.1:{self.settings.api_port}" class="btn">Open Operator Cockpit</a>
 <div class="info">Proxy: 127.0.0.1:{self.settings.proxy_port} | API: 127.0.0.1:{self.settings.api_port}</div>
 </div>
 </body>

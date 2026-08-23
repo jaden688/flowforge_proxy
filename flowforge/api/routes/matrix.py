@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -21,8 +22,11 @@ from flowforge.models.curation import (
     RecommendStrategiesRequest,
     StrategyRecommendation,
 )
+from flowforge.wordlists import WordlistCategory, get_wordlist_loader, reset_wordlist_loader
 
 router = APIRouter(prefix="/api/v1/matrix", tags=["Test Matrix"])
+
+logger = logging.getLogger("flowforge.api.routes.matrix")
 
 # In-memory store for active and completed matrix jobs
 _matrix_jobs: Dict[str, Dict[str, Any]] = {}
@@ -46,6 +50,9 @@ class GenerateMatrixRequest(BaseModel):
     request_body: Optional[str] = None
     parameters: Optional[List[ParameterDefinition]] = None
     categories: Optional[List[str]] = None  # Filter categories if requested
+    wordlist_ids: Optional[List[str]] = None  # Arsenal lists to draw fuzz payloads from
+    fuzz_entries_per_list: int = Field(default=5, ge=1, le=50)
+    enable_content_discovery: bool = True  # Generate route probing cases from discovery lists
 
 
 class TestMatrixCase(BaseModel):
@@ -65,6 +72,7 @@ class TestMatrixCase(BaseModel):
     baseline_flow_id: Optional[str] = None
     executed_flow_id: Optional[str] = None
     result_summary: Optional[Dict[str, Any]] = None
+    wordlist_id: Optional[str] = None  # Provenance when case payload came from a wordlist
 
 
 class TestMatrixJob(BaseModel):
@@ -335,6 +343,76 @@ def _generate_mass_assignment_mutations(path: str, method: str, baseline_flow_id
     ]
 
 
+def _generate_wordlist_fuzz_cases(
+    param: ParameterDefinition,
+    path: str,
+    method: str,
+    baseline_flow_id: Optional[str],
+    wordlists: List[Any],
+    entries_per_list: int,
+) -> List[TestMatrixCase]:
+    cases: List[TestMatrixCase] = []
+    val = param.sample_value
+    for wl in wordlists:
+        try:
+            loader = get_wordlist_loader()
+            samples = loader.sample_entries(wl.id, n=entries_per_list)
+        except Exception:
+            continue
+        for idx, entry in enumerate(samples, start=1):
+            label = f"{wl.collection}/{wl.name}"[:60]
+            preview = entry if len(entry) <= 24 else entry[:21] + "..."
+            cases.append(TestMatrixCase(
+                name=f"Arsenal[{label}] ({param.name} = {preview})",
+                endpoint_path=path,
+                method=method,
+                category="WORDLIST_FUZZ",
+                target_param_location=param.location,
+                target_param_name=param.name,
+                baseline_value=val,
+                mutated_value=entry,
+                baseline_flow_id=baseline_flow_id,
+                wordlist_id=wl.id,
+            ))
+    return cases
+
+
+def _generate_content_discovery_cases(
+    path: str,
+    method: str,
+    baseline_flow_id: Optional[str],
+    wordlists: List[Any],
+    entries_per_list: int,
+) -> List[TestMatrixCase]:
+    cases: List[TestMatrixCase] = []
+    base = path.split("/{")[0].rstrip("/")
+    base = base.rsplit("/", 1)[0] if base.count("/") > 1 and "." in base.rsplit("/", 1)[-1] else base
+    if not base.startswith("/"):
+        base = "/" + base
+    for wl in wordlists:
+        try:
+            loader = get_wordlist_loader()
+            samples = loader.sample_entries(wl.id, n=entries_per_list)
+        except Exception:
+            continue
+        for entry in samples:
+            probe_path = f"{base}/{entry.lstrip('/')}"
+            label = f"{wl.collection}/{wl.name}"[:60]
+            cases.append(TestMatrixCase(
+                name=f"Discovery[{label}]: GET {probe_path}",
+                endpoint_path=probe_path,
+                method="GET",
+                category="CONTENT_DISCOVERY",
+                target_param_location="path",
+                target_param_name="__route__",
+                baseline_value=path,
+                mutated_value=probe_path,
+                baseline_flow_id=baseline_flow_id,
+                wordlist_id=wl.id,
+            ))
+    return cases
+
+
 @router.post("/generate", response_model=TestMatrixJob)
 async def generate_test_matrix(payload: GenerateMatrixRequest, request: Request):
     """
@@ -401,7 +479,29 @@ async def generate_test_matrix(payload: GenerateMatrixRequest, request: Request)
     # 2. Endpoint-level Auth & Mass Assignment mutations
     cases.extend(_generate_auth_mutations(path, method, flow_id))
     cases.extend(_generate_mass_assignment_mutations(path, method, flow_id))
-    
+
+    # 3. Wordlist Arsenal-driven fuzz & content discovery cases
+    if payload.wordlist_ids:
+        try:
+            reset_wordlist_loader()
+            loader = get_wordlist_loader()
+            selected = loader.resolve_ids(payload.wordlist_ids)
+            fuzz_lists = [
+                wl for wl in selected
+                if wl.category in (WordlistCategory.ATTACK_PAYLOADS, WordlistCategory.FUZZ, WordlistCategory.EXPLOITS)
+            ]
+            discovery_lists = [wl for wl in selected if wl.category == WordlistCategory.DISCOVERY]
+            for p in params:
+                cases.extend(
+                    _generate_wordlist_fuzz_cases(p, path, method, flow_id, fuzz_lists, payload.fuzz_entries_per_list)
+                )
+            if payload.enable_content_discovery:
+                cases.extend(
+                    _generate_content_discovery_cases(path, method, flow_id, discovery_lists, payload.fuzz_entries_per_list)
+                )
+        except Exception as w_exc:
+            logger.warning("Wordlist arsenal case generation failed: %s", w_exc)
+
     # Filter by categories if specified
     if payload.categories:
         allowed = set(payload.categories)

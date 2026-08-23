@@ -324,10 +324,15 @@ def test_proposal_boundary_duplicate_anomaly_storm():
         )
 
         flow_props = synthesizer.synthesize(flow, triage)
-        assert len(flow_props) == 6
+        if i == 0:
+            assert len(flow_props) == 6
+        else:
+            # Endpoint-level dedup: identical candidates on an already-staged
+            # endpoint are suppressed instead of flooding the pipeline.
+            assert len(flow_props) == 0
         proposals_pool.extend(flow_props)
 
-    assert len(proposals_pool) == 600  # 100 flows * 6 unique proposals per flow
+    assert len(proposals_pool) == 6  # one clean sweep, zero duplicate storms
 
 
 async def test_proposal_boundary_deleted_and_missing_flow_references(tmp_dir: str):

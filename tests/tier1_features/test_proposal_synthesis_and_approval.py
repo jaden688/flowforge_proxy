@@ -182,7 +182,10 @@ def test_proposal_synthesis_html_reflection_xss():
     assert q_prop.severity in (ProposalSeverity.HIGH, ProposalSeverity.CRITICAL)
     assert q_prop.confidence_score >= 80.0
     assert q_prop.state == ProposalState.PENDING
-    assert "<svg" in str(q_prop.mutated_value) or "<img" in str(q_prop.mutated_value)
+    # Curated SecLists vectors must carry an executable XSS marker (alert()) so the
+    # verdict engine can confirm reflections downstream.
+    assert "alert(" in str(q_prop.mutated_value)
+    assert any(t in q_prop.tags for t in ("curated", "dom_breakout"))
 
 
 def test_proposal_synthesis_sequential_integer_idor():

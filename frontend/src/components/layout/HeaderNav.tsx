@@ -55,6 +55,7 @@ export const HeaderNav: React.FC = () => {
   const navTabs: { id: ActiveView; label: string; icon: React.ReactNode }[] = [
     { id: 'cockpit', label: 'Operator Cockpit', icon: <Zap className="w-4 h-4 text-amber-400" /> },
     { id: 'stream', label: 'Live Stream', icon: <Activity className="w-4 h-4" /> },
+    { id: 'findings', label: 'Findings', icon: <ShieldAlert className="w-4 h-4 text-rose-400" /> },
     { id: 'dossier', label: 'Target Dossier', icon: <Layers className="w-4 h-4" /> },
     { id: 'matrix', label: 'Test Matrix', icon: <Zap className="w-4 h-4" /> },
     { id: 'diff', label: 'Diff Viewer', icon: <GitCompare className="w-4 h-4" /> },

@@ -397,7 +397,42 @@ export interface FlowComparisonResult {
 // UI Navigation & Filter State
 // ============================================================================
 
-export type ActiveView = 'cockpit' | 'stream' | 'dossier' | 'matrix' | 'diff' | 'settings' | 'graph' | 'rules';
+export type ActiveView = 'cockpit' | 'stream' | 'dossier' | 'matrix' | 'diff' | 'settings' | 'graph' | 'rules' | 'findings';
+
+export interface FindingRecord {
+  finding_id: string;
+  proposal_id: string;
+  flow_id: string;
+  executed_flow_id?: string | null;
+  endpoint_hash?: string | null;
+  endpoint_path: string;
+  method: string;
+  anomaly_type: string;
+  title: string;
+  description: string;
+  severity: 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO';
+  confidence_score: number;
+  target_param_name: string;
+  target_param_location: string;
+  baseline_value?: any;
+  mutated_value?: any;
+  tags: string[];
+  verdict_level: string;
+  verdict_description: string;
+  status_delta?: string;
+  length_delta_bytes?: number;
+  latency_delta_ms?: number;
+  reflected?: boolean;
+  response_body_preview?: string | null;
+  executed_at: number;
+}
+
+export interface FindingsStats {
+  total_findings: number;
+  by_verdict: Record<string, number>;
+  by_severity: Record<string, number>;
+  latest: FindingRecord[];
+}
 
 
 export interface FilterState {
