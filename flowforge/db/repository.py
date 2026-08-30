@@ -232,12 +232,15 @@ class FlowRepository:
     async def get_flow_by_id(self, flow_id: str) -> Optional[FlowRecord]:
         """Fetch complete flow record by ID."""
         sql = "SELECT * FROM flows WHERE id = ?;"
-        async with get_connection(self.db_path) as conn:
-            async with conn.execute(sql, (flow_id,)) as cursor:
-                row = await cursor.fetchone()
-                if not row:
-                    return None
-                return _row_to_flow_record(row)
+        try:
+            async with get_connection(self.db_path) as conn:
+                async with conn.execute(sql, (flow_id,)) as cursor:
+                    row = await cursor.fetchone()
+                    if not row:
+                        return None
+                    return _row_to_flow_record(row)
+        except Exception:
+            return None
 
     async def list_flows(
         self,
@@ -393,6 +396,79 @@ class FlowRepository:
                     rows = await cursor.fetchall()
                     summaries = [_row_to_flow_summary(r) for r in rows]
                 return summaries, total
+
+    async def insert_flow(self, flow: FlowRecord) -> bool:
+        """Insert or replace full flow record directly in SQLite."""
+        sql = """
+        INSERT INTO flows (
+            id, timestamp_start, timestamp_end, duration_ms,
+            client_ip, client_port, server_host, server_port, scheme, http_version,
+            method, url, path, query_string, query_params,
+            request_headers, request_content_type, request_content_length, request_body, request_body_is_binary, request_cookies,
+            response_status_code, response_reason, response_headers, response_content_type, response_content_length, response_body, response_body_is_binary, response_cookies,
+            error_message, is_websocket, websocket_message_count,
+            tags, triage_data, is_intercepted, is_favorite, notes, telemetry
+        ) VALUES (
+            ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?, ?, ?
+        )
+        ON CONFLICT(id) DO UPDATE SET
+            timestamp_end = excluded.timestamp_end,
+            duration_ms = excluded.duration_ms,
+            response_status_code = excluded.response_status_code,
+            tags = excluded.tags,
+            triage_data = excluded.triage_data;
+        """
+        resp = flow.response
+        params = (
+            flow.id,
+            flow.timestamp_start,
+            flow.timestamp_end,
+            flow.duration_ms,
+            flow.client_ip,
+            flow.client_port,
+            flow.server_host,
+            flow.server_port,
+            flow.scheme,
+            flow.http_version,
+            flow.request.method,
+            flow.request.url,
+            flow.request.path,
+            flow.request.query_string,
+            json.dumps(flow.request.query_params or {}),
+            json.dumps(flow.request.headers or {}),
+            flow.request.content_type,
+            flow.request.content_length,
+            flow.request.body,
+            1 if flow.request.body_is_binary else 0,
+            json.dumps(flow.request.cookies or {}),
+            resp.status_code if resp else None,
+            resp.reason if resp else None,
+            json.dumps(resp.headers or {}) if resp else None,
+            resp.content_type if resp else None,
+            resp.content_length if resp else None,
+            resp.body if resp else None,
+            1 if (resp and resp.body_is_binary) else 0,
+            json.dumps(resp.cookies or {}) if resp else None,
+            flow.error_message,
+            1 if flow.is_websocket else 0,
+            flow.websocket_message_count,
+            json.dumps(flow.tags or []),
+            json.dumps(flow.triage_data or {}),
+            1 if flow.is_intercepted else 0,
+            1 if flow.is_favorite else 0,
+            flow.notes,
+            json.dumps(flow.telemetry.model_dump()) if flow.telemetry else None,
+        )
+        async with get_connection(self.db_path) as conn:
+            res = await conn.execute(sql, params)
+            await conn.commit()
+            return res.rowcount > 0
 
     async def delete_flow(self, flow_id: str) -> bool:
         """Delete flow by ID (cascades to websocket_messages & parameters)."""

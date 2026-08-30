@@ -34,11 +34,11 @@ export const DeltaMetricsBar: React.FC<DeltaMetricsBarProps> = ({ comparison }) 
           </span>
           <div className="flex items-center gap-1.5 font-bold text-slate-200">
             <span className={flow_a.response_status === 200 ? 'text-emerald-400' : 'text-amber-400'}>
-              {flow_a.response_status || 200}
+              {flow_a.response_status ?? '---'}
             </span>
             <ArrowRight className="w-3 h-3 text-slate-600" />
             <span className={flow_b.response_status === 200 ? 'text-emerald-400' : 'text-amber-400'}>
-              {flow_b.response_status || 200}
+              {flow_b.response_status ?? '---'}
             </span>
           </div>
         </div>
@@ -77,9 +77,9 @@ export const DeltaMetricsBar: React.FC<DeltaMetricsBarProps> = ({ comparison }) 
             Latency Delta
           </span>
           <div className="flex items-center gap-1.5 font-bold text-slate-200">
-            <span>{Math.round(flow_a.latency_ms || 30)}ms</span>
+            <span>{Math.round(flow_a.latency_ms ?? flow_a.duration_ms ?? 0)}ms</span>
             <ArrowRight className="w-3 h-3 text-slate-600" />
-            <span>{Math.round(flow_b.latency_ms || 35)}ms</span>
+            <span>{Math.round(flow_b.latency_ms ?? flow_b.duration_ms ?? 0)}ms</span>
           </div>
         </div>
         <Badge variant="neutral" size="sm">

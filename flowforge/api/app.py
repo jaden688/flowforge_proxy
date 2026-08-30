@@ -54,6 +54,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     repo = FlowRepository(settings.db_path)
     app.state.repo = repo
 
+    # 2b. Initialize PayloadRepository (custom wordlists & intruder campaigns)
+    from flowforge.db.payload_repository import PayloadRepository
+
+    app.state.payload_repo = PayloadRepository(settings.db_path)
+
     # 3. Start AsyncDBWriter batch engine
     db_writer = AsyncDBWriter(
         db_path=settings.db_path,
@@ -66,6 +71,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # 4. Initialize Pub/Sub Broadcaster
     broadcaster = get_broadcaster()
     app.state.broadcaster = broadcaster
+
+    # 4b. Initialize Active Intruder Engine
+    from flowforge.core.intruder import IntruderEngine
+
+    app.state.intruder_engine = IntruderEngine(
+        payload_repo=app.state.payload_repo,
+        flow_repo=repo,
+        broadcaster=broadcaster,
+    )
 
     # 4. Initialize and conditionally start ProxyEngine
     triage_cb = _get_triage_callback()
@@ -174,8 +188,32 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         pass
 
     try:
+        from flowforge.api.routes.intruder import router as intruder_router
+        app.include_router(intruder_router)
+    except ImportError:
+        pass
+
+    try:
+        from flowforge.api.routes.system import router as system_router
+        app.include_router(system_router)
+    except ImportError:
+        pass
+
+    try:
         from flowforge.api.routes.findings import router as findings_router
         app.include_router(findings_router)
+    except ImportError:
+        pass
+
+    try:
+        from flowforge.api.routes.correlation import router as correlation_router
+        app.include_router(correlation_router)
+    except ImportError:
+        pass
+
+    try:
+        from flowforge.api.routes.nuclei import router as nuclei_router
+        app.include_router(nuclei_router)
     except ImportError:
         pass
 
@@ -208,7 +246,10 @@ def _mount_frontend(app: FastAPI) -> None:
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str) -> FileResponse:
-        if full_path and not full_path.startswith(("api/", "ws/")):
+        if full_path and full_path.startswith(("api/", "ws/")):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail=f"API endpoint not found: /{full_path}")
+        if full_path:
             candidate = (dist / full_path).resolve()
             if candidate.is_file() and str(candidate).startswith(str(dist.resolve())):
                 return FileResponse(candidate)

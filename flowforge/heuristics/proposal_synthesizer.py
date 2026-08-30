@@ -86,6 +86,9 @@ class ProposalSynthesizer:
         except Exception:
             self.settings = None
         self._seen_signatures: "OrderedDict[str, None]" = OrderedDict()
+        # Learned IDOR pattern tracker (shared across synthesize calls within one engine)
+        from flowforge.heuristics.idor_patterns import IDORPatternTracker
+        self._idor_tracker = IDORPatternTracker()
 
     def _signature_seen(self, sig: str) -> bool:
         if sig in self._seen_signatures:
@@ -142,7 +145,12 @@ class ProposalSynthesizer:
         raw = f"{p.endpoint_hash}|{p.anomaly_type.value}|{p.target_param_location}|{p.target_param_name}|{payload_sig}|{override_sig}"
         return hashlib.sha1(raw.encode()).hexdigest()
 
-    def synthesize(self, flow: FlowRecord, triage: TriageSummary) -> List[TestProposal]:
+    def synthesize(
+        self,
+        flow: FlowRecord,
+        triage: TriageSummary,
+        correlation_graph: Any = None,
+    ) -> List[TestProposal]:
         """
         Main entrypoint: evaluate all anomaly surfaces and generate deduplicated proposals.
         Applies noise filtering, endpoint-level dedup, severity floor, and per-flow caps.
@@ -152,6 +160,10 @@ class ProposalSynthesizer:
 
         proposals: List[TestProposal] = []
         seen_keys: Set[Tuple[str, str, str, str, str]] = set()
+
+        # Pre-compute endpoint hash for learned IDOR tracker
+        method, host, path = self._get_path_and_host(flow)
+        ep_hash = self._compute_endpoint_hash(method, host, path)
 
         def _add(p: TestProposal) -> None:
             # Intra-flow dedup by full tuple.
@@ -178,6 +190,15 @@ class ProposalSynthesizer:
         for p in self.synthesize_idor(flow, triage):
             _add(p)
 
+        # 2b. Synthesize Learned IDOR Pattern Probes
+        self._idor_tracker.observe_flow(flow, triage)
+        for p in self._idor_tracker.generate_learned_idor_proposals(flow, triage, ep_hash):
+            _add(p)
+
+        # 2c. Synthesize Cross-Endpoint IDOR Probes
+        for p in self.synthesize_cross_endpoint_idor(flow, triage, correlation_graph):
+            _add(p)
+
         # 3. Synthesize Authentication Enforcement & JWT Probes
         for p in self.synthesize_auth(flow, triage):
             _add(p)
@@ -192,6 +213,14 @@ class ProposalSynthesizer:
 
         # 6. Synthesize Custom Rule Match Probes
         for p in self.synthesize_custom_rules(flow, triage):
+            _add(p)
+
+        # 7. Synthesize Data Flow Leak Probes
+        for p in self.synthesize_data_flow_leaks(flow, triage):
+            _add(p)
+
+        # 8. Synthesize Nuclei Template Probes
+        for p in self.synthesize_nuclei(flow, triage):
             _add(p)
 
         # --- Global quality gates -------------------------------------
@@ -503,6 +532,115 @@ class ProposalSynthesizer:
         return proposals
 
     # -------------------------------------------------------------------------
+    # 2b. Cross-Endpoint IDOR / Value Transfer Probes
+    # -------------------------------------------------------------------------
+    def synthesize_cross_endpoint_idor(
+        self,
+        flow: FlowRecord,
+        triage: TriageSummary,
+        correlation_graph: Any = None,
+    ) -> List[TestProposal]:
+        """Generate IDOR proposals by transferring observed values between related endpoints.
+
+        If endpoint A uses user_id=123 and endpoint B also uses user_id, propose
+        injecting A's value into B. Also flags auth mismatches between sibling endpoints.
+        """
+        proposals: List[TestProposal] = []
+        if correlation_graph is None:
+            return proposals
+
+        method, host, path = self._get_path_and_host(flow)
+        ep_hash = self._compute_endpoint_hash(method, host, path)
+
+        # Get related endpoints from the graph
+        related = correlation_graph.get_related_endpoints(ep_hash) if hasattr(correlation_graph, 'get_related_endpoints') else []
+        if not related:
+            return proposals
+
+        # Build a quick lookup of endpoint nodes
+        node_map = {}
+        if hasattr(correlation_graph, 'nodes'):
+            for n in correlation_graph.nodes:
+                node_map[n.endpoint_hash] = n
+
+        # Find the current endpoint's parameters
+        current_params: Dict[str, str] = {}
+        for param in triage.parameters:
+            val = str(param.value) if param.value is not None else param.raw_value
+            if val:
+                current_params[param.name] = val
+
+        # Also extract params from the flow request
+        if flow.request and flow.request.headers:
+            auth = flow.request.headers.get("authorization") or flow.request.headers.get("Authorization") or ""
+            if auth:
+                current_params["_auth_token"] = auth
+
+        for related_hash in related:
+            related_node = node_map.get(related_hash)
+            if not related_node:
+                continue
+
+            # 1. Value Transfer: inject current endpoint's param values into related endpoint
+            for param_name, param_value in current_params.items():
+                if param_name.startswith("_"):
+                    continue
+                if param_name in related_node.parameter_names:
+                    proposals.append(TestProposal(
+                        flow_id=flow.id,
+                        endpoint_hash=ep_hash,
+                        endpoint_path=path,
+                        method=method,
+                        anomaly_type=AnomalyType.CROSS_ENDPOINT_IDOR,
+                        title=f"Cross-Endpoint IDOR (Transfer '{param_name}' → {related_node.path_pattern})",
+                        description=(
+                            f"Parameter '{param_name}' with value '{param_value[:50]}' is shared between "
+                            f"current endpoint and '{related_node.method} {related_node.path_pattern}'. "
+                            f"Tests if the same identifier grants access across both endpoints."
+                        ),
+                        severity=ProposalSeverity.HIGH,
+                        confidence_score=75.0,
+                        target_param_name=param_name,
+                        target_param_location="query",
+                        baseline_value=param_value,
+                        mutated_value=f"[TRANSFER_FROM_{related_node.path_pattern}]",
+                        state=ProposalState.PENDING,
+                        tags=["cross_endpoint", "idor", "value_transfer", "bola"],
+                    ))
+
+            # 2. Auth Mismatch: related endpoint has no auth but current does
+            current_has_auth = "_auth_token" in current_params
+            related_has_auth = any(
+                "auth" in pname.lower() or "token" in pname.lower() or "cookie" in pname.lower()
+                for pname in related_node.parameter_names
+            )
+            if current_has_auth and not related_has_auth:
+                proposals.append(TestProposal(
+                    flow_id=flow.id,
+                    endpoint_hash=ep_hash,
+                    endpoint_path=path,
+                    method=method,
+                    anomaly_type=AnomalyType.CROSS_ENDPOINT_IDOR,
+                    title=f"Auth Mismatch (Authenticated → Unauth '{related_node.path_pattern}')",
+                    description=(
+                        f"Current endpoint requires authentication but related endpoint "
+                        f"'{related_node.method} {related_node.path_pattern}' does not appear to. "
+                        f"Tests if sensitive data is accessible without auth on sibling routes."
+                    ),
+                    severity=ProposalSeverity.CRITICAL,
+                    confidence_score=85.0,
+                    target_param_name="",
+                    target_param_location="header",
+                    baseline_value="[AUTHENTICATED]",
+                    mutated_value="[NO_AUTH]",
+                    auth_override="DROP",
+                    state=ProposalState.PENDING,
+                    tags=["cross_endpoint", "idor", "auth_mismatch", "unauth_access"],
+                ))
+
+        return proposals
+
+    # -------------------------------------------------------------------------
     # 3. Authentication Enforcement & JWT Probes
     # -------------------------------------------------------------------------
     def synthesize_auth(self, flow: FlowRecord, triage: TriageSummary) -> List[TestProposal]:
@@ -733,7 +871,87 @@ class ProposalSynthesizer:
                     tags=["schema", "type_confusion", "null_handling"],
                 ))
 
-        # 3. NoSQL Operator Injection
+            # 3. Schema-Aware Type Confusion — exploit gaps between expected and actual types
+            for k, v in list((parsed_body or {}).items())[:5]:
+                if isinstance(v, bool):
+                    # Boolean → integer/string confusion
+                    bool_conf_mut = dict(parsed_body)
+                    bool_conf_mut[k] = 1
+                    proposals.append(TestProposal(
+                        flow_id=flow.id,
+                        endpoint_hash=ep_hash,
+                        endpoint_path=path,
+                        method=method,
+                        anomaly_type=AnomalyType.JSON_SCHEMA,
+                        title=f"Type Confusion (Bool→Int '{k}')",
+                        description=f"Substitutes boolean '{k}' with integer 1 to test type coercion vulnerability.",
+                        severity=ProposalSeverity.MEDIUM,
+                        confidence_score=72.0,
+                        target_param_name=k,
+                        target_param_location="body",
+                        baseline_value=v,
+                        mutated_value=bool_conf_mut,
+                        state=ProposalState.PENDING,
+                        tags=["schema", "type_confusion", "bool_int"],
+                    ))
+                elif isinstance(v, int):
+                    # Integer → string/float/negative/overflow
+                    for mut_name, mut_val in [
+                        ("string", f"not_a_number_{k}"),
+                        ("float", 1.5),
+                        ("negative", -1),
+                        ("overflow", 999999999999999),
+                    ]:
+                        int_mut = dict(parsed_body)
+                        int_mut[k] = mut_val
+                        proposals.append(TestProposal(
+                            flow_id=flow.id,
+                            endpoint_hash=ep_hash,
+                            endpoint_path=path,
+                            method=method,
+                            anomaly_type=AnomalyType.JSON_SCHEMA,
+                            title=f"Type Confusion (Int→{mut_name.title()} '{k}')",
+                            description=f"Substitutes integer '{k}' with {mut_name} value '{mut_val}' to test type enforcement.",
+                            severity=ProposalSeverity.MEDIUM,
+                            confidence_score=70.0,
+                            target_param_name=k,
+                            target_param_location="body",
+                            baseline_value=v,
+                            mutated_value=int_mut,
+                            state=ProposalState.PENDING,
+                            tags=["schema", "type_confusion", f"int_{mut_name}"],
+                        ))
+                elif isinstance(v, str):
+                    # String → injection vectors: SQL, path traversal, command injection
+                    injection_payloads = [
+                        ("SQL", "1' OR '1'='1"),
+                        ("path_traversal", "../../etc/passwd"),
+                        ("command_injection", "; id"),
+                        ("template_injection", "{{7*7}}"),
+                        ("ldap_injection", "*)(objectClass=*"),
+                    ]
+                    for inj_name, inj_val in injection_payloads[:3]:
+                        str_mut = dict(parsed_body)
+                        str_mut[k] = inj_val
+                        proposals.append(TestProposal(
+                            flow_id=flow.id,
+                            endpoint_hash=ep_hash,
+                            endpoint_path=path,
+                            method=method,
+                            anomaly_type=AnomalyType.JSON_SCHEMA,
+                            title=f"Type Confusion (String→{inj_name} '{k}')",
+                            description=f"Injects {inj_name} payload into string field '{k}' to test input sanitization.",
+                            severity=ProposalSeverity.HIGH,
+                            confidence_score=75.0,
+                            target_param_name=k,
+                            target_param_location="body",
+                            baseline_value=v,
+                            mutated_value=str_mut,
+                            state=ProposalState.PENDING,
+                            tags=["schema", "type_confusion", f"injection_{inj_name.lower()}"],
+                        ))
+
+        # 4. NoSQL Operator Injection
         for param in triage.parameters:
             loc = param.location.value if hasattr(param.location, "value") else str(param.location)
             p_name = param.name.lower()
@@ -757,6 +975,34 @@ class ProposalSynthesizer:
                     tags=["schema", "nosql_injection", "database"],
                 ))
                 break
+
+        # 5. Query Parameter Type Confusion — for non-JSON endpoints
+        if parsed_body is None:
+            for param in triage.parameters:
+                loc = param.location.value if hasattr(param.location, "value") else str(param.location)
+                if loc != "query":
+                    continue
+                raw_val = str(param.value) if param.value is not None else param.raw_value
+                if raw_val and raw_val.isdigit():
+                    # Integer query param → type confusion
+                    for mut_name, mut_val in [("string", "null"), ("overflow", "9999999999")]:
+                        proposals.append(TestProposal(
+                            flow_id=flow.id,
+                            endpoint_hash=ep_hash,
+                            endpoint_path=path,
+                            method=method,
+                            anomaly_type=AnomalyType.JSON_SCHEMA,
+                            title=f"Query Type Confusion (Int→{mut_name.title()} '{param.name}')",
+                            description=f"Substitutes integer query param '{param.name}' with {mut_name} value to test input validation.",
+                            severity=ProposalSeverity.MEDIUM,
+                            confidence_score=68.0,
+                            target_param_name=param.name,
+                            target_param_location="query",
+                            baseline_value=raw_val,
+                            mutated_value=mut_val,
+                            state=ProposalState.PENDING,
+                            tags=["schema", "type_confusion", f"query_int_{mut_name}"],
+                        ))
 
         return proposals
 
@@ -832,6 +1078,154 @@ class ProposalSynthesizer:
                 target_param_location="request",
                 state=ProposalState.PENDING,
                 tags=["custom_rule"] + rule_tags,
+            ))
+
+        return proposals
+
+    # -------------------------------------------------------------------------
+    # 7. Data Flow Leak Detection
+    # -------------------------------------------------------------------------
+    def synthesize_data_flow_leaks(self, flow: FlowRecord, triage: TriageSummary) -> List[TestProposal]:
+        """Detect data leakage by comparing request data against response body.
+
+        Flags cases where request parameters, body fields, or PII-like values
+        appear in the response body, which could indicate information disclosure.
+        """
+        proposals: List[TestProposal] = []
+        method, host, path = self._get_path_and_host(flow)
+        ep_hash = self._compute_endpoint_hash(method, host, path)
+
+        # Collect all request values
+        request_values: Dict[str, str] = {}
+
+        # Query parameters
+        if flow.request and flow.request.query_params:
+            for k, v in flow.request.query_params.items():
+                val = str(v) if v is not None else ""
+                if val and len(val) >= 3:
+                    request_values[f"query.{k}"] = val
+
+        # Request body (JSON)
+        req_body = flow.request.body if flow.request else ""
+        if req_body and isinstance(req_body, str) and req_body.strip().startswith("{"):
+            try:
+                body_dict = json.loads(req_body)
+                if isinstance(body_dict, dict):
+                    for k, v in body_dict.items():
+                        val = str(v) if v is not None else ""
+                        if val and len(val) >= 3:
+                            request_values[f"body.{k}"] = val
+            except Exception:
+                pass
+
+        # Request headers (excluding common non-sensitive ones)
+        _sensitive_headers = {"authorization", "x-api-key", "apikey", "x-auth-token", "cookie"}
+        if flow.request and flow.request.headers:
+            for k, v in flow.request.headers.items():
+                if k.lower() in _sensitive_headers:
+                    continue
+                val = str(v) if v is not None else ""
+                if val and len(val) >= 5 and not val.startswith(("http", "application/", "text/")):
+                    request_values[f"header.{k}"] = val
+
+        if not request_values:
+            return proposals
+
+        # Get response body
+        resp_body = flow.response.body if (flow.response and flow.response.body) else ""
+        if not resp_body or not isinstance(resp_body, str):
+            return proposals
+
+        resp_lower = resp_body.lower()
+
+        # Check for request values appearing in response body
+        leaked: List[Tuple[str, str]] = []
+        for source, value in request_values.items():
+            val_lower = value.lower()
+            if val_lower in resp_lower and len(value) >= 5:
+                # Exclude trivial matches (common words, numbers < 100)
+                if value.isdigit() and int(value) < 100:
+                    continue
+                if value.lower() in ("true", "false", "null", "undefined", "none"):
+                    continue
+                leaked.append((source, value))
+
+        if leaked:
+            # Generate a single consolidated proposal for all leaked values
+            leaked_params = [src.split(".", 1)[1] for src, _ in leaked[:5]]
+            leaked_preview = ", ".join(f"'{v[:30]}'" for _, v in leaked[:3])
+            proposals.append(TestProposal(
+                flow_id=flow.id,
+                endpoint_hash=ep_hash,
+                endpoint_path=path,
+                method=method,
+                anomaly_type=AnomalyType.SECRET_EXPOSURE,
+                title=f"Data Flow Leak ({len(leaked)} value(s) echoed in response)",
+                description=(
+                    f"Request data appears verbatim in response body. "
+                    f"Leaked parameters: {', '.join(leaked_params)}. "
+                    f"Values: {leaked_preview}. "
+                    f"This may indicate information disclosure or improper data handling."
+                ),
+                severity=ProposalSeverity.HIGH,
+                confidence_score=80.0,
+                target_param_name=leaked_params[0] if leaked_params else "",
+                target_param_location=leaked[0][0].split(".")[0] if leaked else "body",
+                baseline_value=leaked[0][1] if leaked else "",
+                mutated_value="[VERIFIED_IN_RESPONSE]",
+                state=ProposalState.PENDING,
+                tags=["data_leak", "information_disclosure", "response_echo"],
+            ))
+
+        return proposals
+
+    # -------------------------------------------------------------------------
+    # 8. Nuclei Template Match & Active Probe Synthesis
+    # -------------------------------------------------------------------------
+    def synthesize_nuclei(self, flow: FlowRecord, triage: TriageSummary) -> List[TestProposal]:
+        """Synthesize test proposals from Nuclei template matches and active probes."""
+        proposals: List[TestProposal] = []
+        method, host, path = self._get_path_and_host(flow)
+        ep_hash = self._compute_endpoint_hash(method, host, path)
+
+        # 1. Passive match findings recorded in triage
+        nuclei_matches = getattr(triage, "nuclei_matches", []) or []
+        for nm in nuclei_matches:
+            tmpl_id = str(getattr(nm, "template_id", "nuclei-template"))
+            tmpl_name = str(getattr(nm, "template_name", tmpl_id))
+            cat = str(getattr(nm, "category", "MISC")).upper()
+            raw_sev = getattr(nm, "severity", "MEDIUM")
+            sev = self._map_finding_severity(raw_sev)
+            tags = list(getattr(nm, "tags", []))
+            conds = list(getattr(nm, "matched_conditions", []))
+            cond_str = "; ".join(conds) if conds else "Passive response condition satisfied"
+
+            # Category mapping
+            if cat == "CVE" or tmpl_id.lower().startswith("cve-"):
+                anomaly_type = AnomalyType.CVE
+            elif cat == "EXPOSURE":
+                anomaly_type = AnomalyType.EXPOSURE
+            elif cat == "MISCONFIG":
+                anomaly_type = AnomalyType.MISCONFIG
+            else:
+                anomaly_type = AnomalyType.NUCLEI_TEMPLATE
+
+            proposals.append(TestProposal(
+                flow_id=flow.id,
+                endpoint_hash=ep_hash,
+                endpoint_path=path,
+                method=method,
+                anomaly_type=anomaly_type,
+                title=f"[Nuclei] {tmpl_name} ({tmpl_id})",
+                description=f"Nuclei template {tmpl_name} ({tmpl_id}) matched on intercepted traffic. Conditions: {cond_str}",
+                severity=sev,
+                confidence_score=90.0 if sev in (ProposalSeverity.CRITICAL, ProposalSeverity.HIGH) else 75.0,
+                target_param_name="",
+                target_param_location="response",
+                baseline_value="[PASSIVE_MATCH]",
+                mutated_value="[CONFIRMED]",
+                state=ProposalState.PENDING,
+                tags=["nuclei", tmpl_id.lower()] + [str(t).lower() for t in tags],
             ))
 
         return proposals

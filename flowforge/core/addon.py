@@ -28,6 +28,13 @@ from flowforge.utils.http_parser import decode_body, parse_cookies, parse_query_
 
 logger = logging.getLogger("flowforge.core.addon")
 
+INTERNAL_IGNORE_PATHS = {
+    "/api/v1/ws/traffic",
+    "/api/v1/ws",
+    "/api/v1/events",
+}
+INTERNAL_HEADER = "x-flowforge-internal"
+
 
 def compute_endpoint_hash(method: str, host: str, path_pattern: str) -> str:
     """Compute deterministic SHA256 endpoint hash."""
@@ -52,6 +59,7 @@ class FlowForgeInterceptorAddon:
         self.schema_inferrer = SchemaInferrer()
         self._endpoint_schemas: Dict[str, Dict[str, Any]] = {}
         self._endpoint_counts: Dict[str, int] = {}
+        self._schema_merge_lock = asyncio.Lock()
 
     def _get_flow_id(self, flow: http.HTTPFlow) -> str:
         """Retrieve existing FlowForge ID or assign a new UUID."""
@@ -175,9 +183,43 @@ class FlowForgeInterceptorAddon:
             bandwidth=bandwidth_telemetry,
         )
 
+    def _is_internal_traffic(self, flow: http.HTTPFlow) -> bool:
+        """Detect FlowForge's own control-plane traffic (dashboard API / REST endpoints / WebSocket streams / dev server)."""
+        req = getattr(flow, "request", None)
+        if req is None:
+            return False
+        if req.headers.get(INTERNAL_HEADER):
+            return True
+
+        # Check host and port
+        host = (getattr(req, "host", "") or "").lower()
+        pretty_host = (getattr(req, "pretty_host", "") or "").lower()
+        port = getattr(req, "port", None)
+
+        is_local_host = (
+            host in ("127.0.0.1", "localhost", "flowforge.local")
+            or pretty_host in ("127.0.0.1", "localhost", "flowforge.local")
+        )
+
+        # Internal API port (8000) or Vite dev server port (5173)
+        internal_ports = {self.settings.api_port, 5173}
+        if is_local_host and port in internal_ports:
+            return True
+
+        path = (req.path or "").split("?", 1)[0]
+        if path.startswith("/api/v1/") or path.startswith("/docs") or path.startswith("/openapi.json") or path in INTERNAL_IGNORE_PATHS:
+            return True
+
+        return False
+
     def request(self, flow: http.HTTPFlow) -> None:
         """Lifecycle hook invoked when request headers and body have arrived."""
         try:
+            # Skip ingestion/triage for internal dashboard & WebSocket control-plane routes
+            # to prevent telemetry recursion (proxy sniffing its own broadcasts).
+            if self._is_internal_traffic(flow):
+                return
+
             # Handle requests sent directly to the proxy's own port (e.g., http://127.0.0.1:8080/ or http://mitm.it)
             if flow.request.pretty_host in ("127.0.0.1", "localhost", "flowforge.local", "mitm.it") and flow.request.port == self.settings.proxy_port:
                 html = f"""<!DOCTYPE html>
@@ -280,6 +322,8 @@ p {{ color: #94a3b8; font-size: 0.95rem; line-height: 1.6; margin-bottom: 1.5rem
     def response(self, flow: http.HTTPFlow) -> None:
         """Lifecycle hook invoked when response headers and body have completed."""
         try:
+            if self._is_internal_traffic(flow):
+                return
             flow_id = self._get_flow_id(flow)
             resp = flow.response
             if not resp:
@@ -397,13 +441,14 @@ p {{ color: #94a3b8; font-size: 0.95rem; line-height: 1.6; margin-bottom: 1.5rem
             sample_count = self._endpoint_counts[ep_hash]
 
             schema_inferred = getattr(triage_summary, "schema_inferred", {}) or {}
-            if isinstance(schema_inferred, dict):
-                existing_schema = self._endpoint_schemas.get(ep_hash, {})
-                merged_schema = self.schema_inferrer.merge_schemas(existing_schema, schema_inferred, sample_count=sample_count)
-            else:
-                merged_schema = self._endpoint_schemas.get(ep_hash, {})
+            async with self._schema_merge_lock:
+                if isinstance(schema_inferred, dict):
+                    existing_schema = self._endpoint_schemas.get(ep_hash, {})
+                    merged_schema = self.schema_inferrer.merge_schemas(existing_schema, schema_inferred, sample_count=sample_count)
+                else:
+                    merged_schema = self._endpoint_schemas.get(ep_hash, {})
 
-            self._endpoint_schemas[ep_hash] = merged_schema
+                self._endpoint_schemas[ep_hash] = merged_schema
 
             ep_cat = getattr(triage_summary, "endpoint_category", "DATA_READ")
             cat_str = ep_cat.value if hasattr(ep_cat, "value") else str(ep_cat)
@@ -492,6 +537,8 @@ p {{ color: #94a3b8; font-size: 0.95rem; line-height: 1.6; margin-bottom: 1.5rem
     def error(self, flow: http.HTTPFlow) -> None:
         """Lifecycle hook invoked when network or SSL connection fails."""
         try:
+            if self._is_internal_traffic(flow):
+                return
             flow_record: Optional[FlowRecord] = flow.metadata.get("flowforge_record")
             if not flow_record:
                 self.request(flow)
@@ -514,6 +561,10 @@ p {{ color: #94a3b8; font-size: 0.95rem; line-height: 1.6; margin-bottom: 1.5rem
     def websocket_message(self, flow: http.HTTPFlow) -> None:
         """Lifecycle hook invoked on every incoming/outgoing WebSocket frame."""
         try:
+            # Critical recursion guard: never re-ingest frames from our own
+            # control-plane WebSocket (broadcasts would be wrapped and rebroadcast).
+            if self._is_internal_traffic(flow):
+                return
             if not flow.websocket or not flow.websocket.messages:
                 return
 

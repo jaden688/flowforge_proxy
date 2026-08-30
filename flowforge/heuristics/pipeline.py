@@ -12,17 +12,31 @@ from flowforge.heuristics.models import (
     FindingSeverity,
     TriageSummary,
 )
+from flowforge.heuristics.nuclei_loader import (
+    NucleiTemplateLoader,
+    get_nuclei_loader,
+)
+from flowforge.heuristics.nuclei_matcher import (
+    NucleiMatcherEngine,
+    get_nuclei_matcher,
+)
 from flowforge.heuristics.parameters import ParameterExtractor
 from flowforge.heuristics.reflection import ReflectionDetector
 from flowforge.heuristics.rule_engine import RuleEngine, get_rule_engine
 from flowforge.heuristics.schema_inferrer import SchemaInferrer
+from flowforge.models.nuclei import NucleiSeverity
 from flowforge.models.rules import RuleSeverity
 
 
 class TriagePipeline:
     """Orchestrates passive heuristic analyzers on intercepted HTTP and WebSocket flows."""
 
-    def __init__(self, rule_engine: Optional[RuleEngine] = None):
+    def __init__(
+        self,
+        rule_engine: Optional[RuleEngine] = None,
+        nuclei_loader: Optional[NucleiTemplateLoader] = None,
+        nuclei_matcher: Optional[NucleiMatcherEngine] = None,
+    ):
         self.param_extractor = ParameterExtractor()
         self.schema_inferrer = SchemaInferrer()
         self.reflection_detector = ReflectionDetector()
@@ -32,6 +46,8 @@ class TriagePipeline:
         self.endpoint_classifier = EndpointClassifier()
         self.route_normalizer = RouteNormalizer()
         self.rule_engine = rule_engine or get_rule_engine()
+        self.nuclei_loader = nuclei_loader or get_nuclei_loader()
+        self.nuclei_matcher = nuclei_matcher or get_nuclei_matcher()
 
 
     async def process_flow(self, flow: Any) -> TriageSummary:
@@ -133,6 +149,15 @@ class TriagePipeline:
         # 8. Custom Heuristic Rule Engine Evaluation
         rule_matches = self.rule_engine.evaluate_flow(flow=flow, parameters=parameters)
 
+        # 8b. Passive Nuclei Template Evaluation
+        nuclei_matches: List[Any] = []
+        try:
+            passive_templates = self.nuclei_loader.get_passive_templates()
+            if passive_templates:
+                nuclei_matches = self.nuclei_matcher.evaluate_flow_all(passive_templates, flow)
+        except Exception as exc:
+            logger.debug("Error during passive Nuclei evaluation: %s", exc)
+
         # 9. Tag Generation & High-Priority Anomaly Flagging
         tags: List[str] = []
         has_high_priority = False
@@ -181,6 +206,22 @@ class TriagePipeline:
             if rm.severity in (FindingSeverity.CRITICAL, FindingSeverity.HIGH, RuleSeverity.CRITICAL, RuleSeverity.HIGH):
                 has_high_priority = True
 
+        # Add Nuclei template tags and check high-priority triggers
+        for nm in nuclei_matches:
+            tags.append("nuclei")
+            if getattr(nm, "template_id", None):
+                tags.append(str(nm.template_id).lower())
+            if getattr(nm, "category", None):
+                tags.append(str(nm.category).lower())
+            if getattr(nm, "tags", None):
+                tags.extend([str(t).lower() for t in nm.tags])
+            nm_sev = getattr(nm, "severity", None)
+            if isinstance(nm_sev, NucleiSeverity):
+                if nm_sev in (NucleiSeverity.CRITICAL, NucleiSeverity.HIGH):
+                    has_high_priority = True
+            elif str(nm_sev).lower() in ("critical", "high"):
+                has_high_priority = True
+
         duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
 
         return TriageSummary(
@@ -194,6 +235,7 @@ class TriagePipeline:
             identifier_findings=identifier_findings,
             schema_inferred=schema_inferred,
             rule_matches=rule_matches,
+            nuclei_matches=nuclei_matches,
             tags=sorted(list(set(tags))),
             has_high_priority_anomalies=has_high_priority,
             analysis_duration_ms=duration_ms,

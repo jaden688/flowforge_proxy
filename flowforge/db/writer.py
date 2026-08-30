@@ -12,6 +12,7 @@ from typing import Any, List, Optional
 
 from flowforge.config import get_settings
 from flowforge.db.connection import get_connection
+from flowforge.heuristics.schema_inferrer import SchemaInferrer
 from flowforge.models.flow import FlowRecord
 from flowforge.models.parameter import DiscoveredEndpointModel, ExtractedParameterModel
 from flowforge.models.proposal import TestProposal
@@ -58,15 +59,32 @@ class AsyncDBWriter:
         if not self._running:
             return
         self._running = False
-        # Flush remaining items
-        await self.flush()
+        # Wait for the worker to naturally finish its current batch and exit.
+        # The _flush_loop checks `while self._running:` and will exit after
+        # its current iteration completes.
         if self._worker_task and not self._worker_task.done():
-            self._worker_task.cancel()
             try:
                 await self._worker_task
             except asyncio.CancelledError:
                 pass
+        # After the worker has exited, drain any remaining items that may
+        # have been left in the queue (e.g. from a race between the loop's
+        # exit check and a concurrent enqueue).
+        await self._drain_queue()
         logger.info("AsyncDBWriter stopped.")
+
+    async def _drain_queue(self) -> None:
+        """Drain all remaining items from the queue without relying on empty()."""
+        while True:
+            # Use get() which blocks until an item is available; since _running
+            # is now False, any items still in the queue will be returned.
+            try:
+                op = await asyncio.wait_for(self.queue.get(), timeout=0.5)
+                self.queue.task_done()
+                await self._process_batch([op])
+            except asyncio.TimeoutError:
+                # If the queue is truly empty after waiting, stop draining.
+                break
 
     async def enqueue_insert_flow(self, flow: FlowRecord) -> None:
         """Enqueue initial flow creation write."""
@@ -111,16 +129,22 @@ class AsyncDBWriter:
 
     async def flush(self) -> None:
         """Force immediate synchronous flush of all queued write operations."""
-        while not self.queue.empty():
-            batch: List[WriteOp] = []
-            while len(batch) < self.max_batch_size and not self.queue.empty():
-                try:
-                    batch.append(self.queue.get_nowait())
-                    self.queue.task_done()
-                except asyncio.QueueEmpty:
+        batch: List[WriteOp] = []
+        while True:
+            try:
+                op = self.queue.get_nowait()
+                batch.append(op)
+                self.queue.task_done()
+            except asyncio.QueueEmpty:
+                if not batch:
                     break
-            if batch:
-                await self._process_batch(batch)
+                if batch:
+                    await self._process_batch(batch)
+                    batch = []
+                # Continue draining if more items are likely
+                continue
+        if batch:
+            await self._process_batch(batch)
 
     async def _flush_loop(self) -> None:
         """Background loop continuously consuming and batching queued writes."""
@@ -134,9 +158,12 @@ class AsyncDBWriter:
                     self.queue.task_done()
 
                     # Drain up to max_batch_size items without blocking
-                    while len(batch) < self.max_batch_size and not self.queue.empty():
-                        batch.append(self.queue.get_nowait())
-                        self.queue.task_done()
+                    while len(batch) < self.max_batch_size:
+                        try:
+                            batch.append(self.queue.get_nowait())
+                            self.queue.task_done()
+                        except asyncio.QueueEmpty:
+                            break
                 except asyncio.TimeoutError:
                     continue
 
@@ -352,7 +379,29 @@ class AsyncDBWriter:
         await conn.execute(sql, params)
 
     async def _write_endpoint(self, conn: Any, endpoint: DiscoveredEndpointModel) -> None:
-        """Insert or update discovered endpoint catalog."""
+        """Insert or update discovered endpoint catalog with cumulative schema merge."""
+        # Read existing schema to merge instead of overwriting
+        merged_schema = endpoint.schema_summary
+        try:
+            cursor = await conn.execute(
+                "SELECT schema_summary FROM endpoints WHERE endpoint_hash = ?;",
+                (endpoint.endpoint_hash,),
+            )
+            row = await cursor.fetchone()
+            if row and row[0]:
+                existing_raw = row[0]
+                if isinstance(existing_raw, str):
+                    existing_schema = json.loads(existing_raw)
+                else:
+                    existing_schema = existing_raw
+                if existing_schema and endpoint.schema_summary:
+                    inferrer = SchemaInferrer()
+                    merged_schema = inferrer.merge_schemas(
+                        existing_schema, endpoint.schema_summary, sample_count=2
+                    )
+        except Exception as exc:
+            logger.debug("Schema merge read failed for %s, using new: %s", endpoint.endpoint_hash, exc)
+
         sql = """
         INSERT INTO endpoints (
             endpoint_hash, method, host, path_pattern, first_seen, last_seen, request_count, category, schema_summary
@@ -372,7 +421,7 @@ class AsyncDBWriter:
             endpoint.last_seen,
             endpoint.request_count,
             endpoint.category,
-            json_dumps(endpoint.schema_summary),
+            json_dumps(merged_schema),
         )
         await conn.execute(sql, params)
 
@@ -449,4 +498,3 @@ class AsyncDBWriter:
             proposal.updated_at,
         )
         await conn.execute(sql, params)
-

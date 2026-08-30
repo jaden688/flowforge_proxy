@@ -97,9 +97,9 @@ export const ExecutionFeed: React.FC<ExecutionFeedProps> = ({ job }) => {
 
                 <div className="flex items-center gap-2 text-slate-400 text-[11px] flex-shrink-0">
                   <span className={c.result_summary?.status_code === 200 ? 'text-emerald-400 font-bold' : 'text-amber-400'}>
-                    HTTP {c.result_summary?.status_code || 200}
+                    HTTP {c.result_summary?.status_code ?? '---'}
                   </span>
-                  <span>{c.result_summary?.latency_ms || 15}ms</span>
+                  <span>{c.result_summary?.latency_ms ?? 0}ms</span>
                   {c.result_summary?.reflected && (
                     <Badge variant="reflection" size="sm">
                       <Sparkles className="w-2.5 h-2.5" />

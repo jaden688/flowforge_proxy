@@ -12,9 +12,26 @@ import {
   CustomRule,
   TestProposal,
   ProposalExecutionResult,
-  ProposalDiffSummary
+  ProposalDiffSummary,
+  IntruderJob,
+  IntruderResult,
+  IntruderResultFilters,
+  TelemetryLogEntry
 } from '../types';
 import { api } from '../services/api';
+
+// Live anomaly filter for streaming intruder results.
+function intruderResultMatchesFilters(r: IntruderResult, f: IntruderResultFilters): boolean {
+  if (f.anomaliesOnly && (!r.anomaly_reasons || r.anomaly_reasons.length === 0)) return false;
+  if (f.reflectedOnly && !r.reflected) return false;
+  if (f.statusCodes.length > 0 && (r.status_code == null || !f.statusCodes.includes(r.status_code))) return false;
+  if (f.minSize != null && (r.response_size_bytes == null || r.response_size_bytes < f.minSize)) return false;
+  if (f.maxSize != null && (r.response_size_bytes == null || r.response_size_bytes > f.maxSize)) return false;
+  if (f.minTimeMs != null && (r.response_time_ms == null || r.response_time_ms < f.minTimeMs)) return false;
+  if (f.maxTimeMs != null && (r.response_time_ms == null || r.response_time_ms > f.maxTimeMs)) return false;
+  if (f.payloadSearch && !r.payload.toLowerCase().includes(f.payloadSearch.toLowerCase())) return false;
+  return true;
+}
 
 interface FlowStoreState {
   // Flows state
@@ -47,6 +64,11 @@ interface FlowStoreState {
   // Staging / Matrix state
   activeMatrixJob: TestMatrixJob | null;
 
+  // Active Intruder state
+  activeIntruderJob: IntruderJob | null;
+  intruderResults: IntruderResult[];
+  intruderResultFilters: IntruderResultFilters;
+
   // Payload Curation State (F25-F26)
   payloadGroups: Record<string, CuratedPayloadGroup>;
 
@@ -66,6 +88,7 @@ interface FlowStoreState {
   activeProposalFlowId: string | null;
   filterOnlyWithProposals: boolean;
   activeDiffProposal: TestProposal | null;
+  telemetryLogs: TelemetryLogEntry[];
 
   // Actions
   addFlow: (flow: FlowRecord) => void;
@@ -78,6 +101,8 @@ interface FlowStoreState {
   clearFlows: () => void;
   setPaused: (paused: boolean) => void;
   setWsStatus: (connected: boolean, latency?: number) => void;
+  addTelemetryLog: (log: TelemetryLogEntry) => void;
+  clearTelemetryLogs: () => void;
   
   // Dossier actions
   setDossiers: (dossiers: EndpointDossier[]) => void;
@@ -89,6 +114,26 @@ interface FlowStoreState {
   updateMatrixCase: (caseId: string, updates: Partial<TestMatrixCase>) => void;
   toggleCaseSelected: (caseId: string) => void;
   toggleAllCasesSelected: (selected: boolean) => void;
+
+  // Intruder actions
+  setActiveIntruderJob: (job: IntruderJob | null) => void;  addIntruderResult: (result: IntruderResult) => void;
+  updateIntruderJobProgress: (progress: {
+    job_id: string;
+    status?: string;
+    completed_requests?: number;
+    total_requests?: number;
+  }) => void;
+  setIntruderResultFilters: (filters: Partial<IntruderResultFilters>) => void;
+  clearIntruderResults: () => void;
+  resetEngagementState: () => void;
+  clearCapturedData: (flags: {
+    flows?: boolean;
+    endpoints?: boolean;
+    proposals?: boolean;
+    intruder_jobs?: boolean;
+    wordlists?: boolean;
+    curated_payloads?: boolean;
+  }) => Promise<{ ok: boolean; cleared: Record<string, number> }>;
 
   // Curation & Pruning actions (F25-F26)
   createPayloadGroup: (group: Omit<CuratedPayloadGroup, 'id' | 'created_at' | 'updated_at'>) => void;
@@ -105,6 +150,7 @@ interface FlowStoreState {
   deleteRule: (id: string) => void;
   toggleRule: (id: string) => void;
   selectRule: (id: string | null) => void;
+  syncRulesFromBackend: () => Promise<void>;
 
   // Diff actions
   setDiffPair: (flowAId: string | null, flowBId: string | null) => void;
@@ -121,6 +167,8 @@ interface FlowStoreState {
   setActiveDiffProposal: (proposal: TestProposal | null) => void;
   transferProposalToMatrix: (proposalId: string) => void;
   saveProposalToCurated: (proposalId: string, groupId?: string) => void;
+  transferProposalToIntruder: (proposalId: string) => Promise<void>;
+  sweepProposalsToIntruder: (opts?: { min_confidence?: number; max_proposals?: number }) => Promise<any>;
 }
 
 const initialFilters: FilterState = {
@@ -165,70 +213,7 @@ const defaultPayloadGroups: Record<string, CuratedPayloadGroup> = {
   },
 };
 
-const defaultRules: Record<string, CustomRule> = {
-  'rule-admin-surface': {
-    id: 'rule-admin-surface',
-    name: 'Exposed Admin API Surface',
-    description: 'Identifies unauthenticated or accessible administrative endpoints',
-    severity: 'HIGH',
-    enabled: true,
-    tags: ['admin', 'unauth', 'critical_surface'],
-    match_logic: 'ALL',
-    conditions: [
-      { field: 'path', operator: 'contains', value: '/admin' },
-      { field: 'status_code', operator: 'lt', value: 400 },
-    ],
-    matches_count: 0,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-  'rule-high-entropy-secret': {
-    id: 'rule-high-entropy-secret',
-    name: 'High-Entropy Secret / API Key Exposure',
-    description: 'Flags authorization bearer tokens or high-entropy credentials in bodies/headers',
-    severity: 'CRITICAL',
-    enabled: true,
-    tags: ['secret', 'token', 'leak'],
-    match_logic: 'ANY',
-    conditions: [
-      { field: 'entropy', operator: 'gt', value: 4.5 },
-      { field: 'header', key: 'authorization', operator: 'starts_with', value: 'Bearer eyJ' },
-    ],
-    matches_count: 0,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-  'rule-idor-sequential': {
-    id: 'rule-idor-sequential',
-    name: 'Sequential Integer Object Identifier',
-    description: 'Detects numeric identifier parameters susceptible to IDOR tampering',
-    severity: 'MEDIUM',
-    enabled: true,
-    tags: ['idor', 'parameter'],
-    match_logic: 'ALL',
-    conditions: [
-      { field: 'query_param', key: 'id', operator: 'regex', value: '^[0-9]+$' },
-    ],
-    matches_count: 0,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-  'rule-db-error-trace': {
-    id: 'rule-db-error-trace',
-    name: 'Database Exception / Syntax Error Leak',
-    description: 'Flags SQL syntax errors, database tracebacks, or ORM internal exceptions in response bodies',
-    severity: 'CRITICAL',
-    enabled: true,
-    tags: ['sqli', 'error_leak', 'traceback'],
-    match_logic: 'ANY',
-    conditions: [
-      { field: 'response_body', operator: 'regex', value: '(SQL syntax|PostgreSQL query failed|sqlite3.OperationalError|ORA-[0-9]{5}|pymysql.err)' },
-    ],
-    matches_count: 0,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  },
-};
+const defaultRules: Record<string, CustomRule> = {};
 
 function normalizeFlowRecord(flow: any): FlowRecord {
   if (!flow) return flow;
@@ -236,13 +221,33 @@ function normalizeFlowRecord(flow: any): FlowRecord {
   const reqObj = flow.request || {};
   const respObj = flow.response || {};
 
-  const reqHeaders = flow.request_headers || reqObj.headers || {};
-  const respHeaders = flow.response_headers || respObj.headers || {};
+  const reqHeaders = (reqObj.headers && Object.keys(reqObj.headers).length > 0)
+    ? reqObj.headers
+    : (flow.request_headers || {});
 
-  const reqBody = flow.request_body !== undefined ? flow.request_body : (reqObj.body ?? null);
-  const respBody = flow.response_body !== undefined ? flow.response_body : (respObj.body ?? null);
+  const respHeaders = (respObj.headers && Object.keys(respObj.headers).length > 0)
+    ? respObj.headers
+    : (flow.response_headers || {});
 
-  const queryParams = flow.query_params || reqObj.query_params || {};
+  const reqBody = (reqObj.body !== undefined && reqObj.body !== null)
+    ? reqObj.body
+    : (flow.request_body ?? null);
+
+  const respBody = (respObj.body !== undefined && respObj.body !== null)
+    ? respObj.body
+    : (flow.response_body ?? null);
+
+  const queryParams = (reqObj.query_params && Object.keys(reqObj.query_params).length > 0)
+    ? reqObj.query_params
+    : (flow.query_params || {});
+
+  const reqCookies = (reqObj.cookies && Object.keys(reqObj.cookies).length > 0)
+    ? reqObj.cookies
+    : (flow.request_cookies || {});
+
+  const respCookies = (respObj.cookies && Object.keys(respObj.cookies).length > 0)
+    ? respObj.cookies
+    : (flow.response_cookies || {});
 
   const reqSize = flow.request_size 
     ?? flow.request_content_length 
@@ -273,6 +278,8 @@ function normalizeFlowRecord(flow: any): FlowRecord {
     response_headers: respHeaders,
     request_body: reqBody,
     response_body: respBody,
+    request_cookies: reqCookies,
+    response_cookies: respCookies,
     request_content_type: flow.request_content_type || reqObj.content_type || reqHeaders['content-type'] || null,
     response_content_type: flow.response_content_type || respObj.content_type || respHeaders['content-type'] || null,
     request_size: reqSize,
@@ -308,6 +315,19 @@ export const useFlowStore = create<FlowStoreState>((set, get) => ({
   dossiers: {},
   selectedDossierKey: null,
   activeMatrixJob: null,
+
+  activeIntruderJob: null,
+  intruderResults: [],
+  intruderResultFilters: {
+    anomaliesOnly: false,
+    reflectedOnly: false,
+    minSize: null,
+    maxSize: null,
+    minTimeMs: null,
+    maxTimeMs: null,
+    statusCodes: [],
+    payloadSearch: '',
+  },
   payloadGroups: defaultPayloadGroups,
 
   rules: defaultRules,
@@ -323,6 +343,7 @@ export const useFlowStore = create<FlowStoreState>((set, get) => ({
   activeProposalFlowId: null,
   filterOnlyWithProposals: false,
   activeDiffProposal: null,
+  telemetryLogs: [],
 
   addFlow: (flowRaw: FlowRecord) => {
     if (get().isPaused) return;
@@ -487,6 +508,16 @@ export const useFlowStore = create<FlowStoreState>((set, get) => ({
     set({ wsConnected: connected, wsLatencyMs: latency });
   },
 
+  addTelemetryLog: (log: TelemetryLogEntry) => {
+    set((state) => ({
+      telemetryLogs: [log, ...state.telemetryLogs.slice(0, 99)],
+    }));
+  },
+
+  clearTelemetryLogs: () => {
+    set({ telemetryLogs: [] });
+  },
+
   setDossiers: (dossierList: EndpointDossier[]) => {
     const map: Record<string, EndpointDossier> = {};
     dossierList.forEach((d) => {
@@ -506,6 +537,104 @@ export const useFlowStore = create<FlowStoreState>((set, get) => ({
   selectDossier: (key: string | null) => set({ selectedDossierKey: key }),
 
   setMatrixJob: (job: TestMatrixJob | null) => set({ activeMatrixJob: job }),
+
+  setActiveIntruderJob: (job: IntruderJob | null) =>
+    set({ activeIntruderJob: job, intruderResults: job ? [] : get().intruderResults }),
+
+  addIntruderResult: (result: IntruderResult) => {
+    const filters = get().intruderResultFilters;
+    // Live anomaly filtering: drop rows that fail the operator's current filter.
+    if (!intruderResultMatchesFilters(result, filters)) return;
+    set((state) => ({
+      intruderResults: [...state.intruderResults, result].slice(-3000),
+    }));
+  },
+
+  updateIntruderJobProgress: (progress) => {
+    const job = get().activeIntruderJob;
+    if (!job || job.id !== progress.job_id) return;
+    set({
+      activeIntruderJob: {
+        ...job,
+        status: (progress.status as IntruderJob['status']) ?? job.status,
+        completed_requests: progress.completed_requests ?? job.completed_requests,
+        total_requests: progress.total_requests ?? job.total_requests,
+      },
+    });
+  },
+
+  setIntruderResultFilters: (filters) =>
+    set((state) => ({ intruderResultFilters: { ...state.intruderResultFilters, ...filters } })),
+
+  clearIntruderResults: () => set({ intruderResults: [] }),
+
+  resetEngagementState: () => {
+    set({
+      flows: {},
+      flowOrder: [],
+      selectedFlowId: null,
+      proposals: {},
+      proposalOrder: [],
+      dossiers: {},
+      activeMatrixJob: null,
+      activeIntruderJob: null,
+      intruderResults: [],
+      stats: {
+        totalFlows: 0,
+        reflectionsCount: 0,
+        idorCount: 0,
+        secretsCount: 0,
+        authAnomaliesCount: 0,
+      },
+    });
+  },
+
+  clearCapturedData: async (flags) => {
+    try {
+      const result = await api.clearData(flags);
+      if (result.ok) {
+        // Selectively reset client-side state based on what was cleared
+        if (flags.flows) {
+          set({
+            flows: {},
+            flowOrder: [],
+            selectedFlowId: null,
+            stats: {
+              totalFlows: 0,
+              reflectionsCount: 0,
+              idorCount: 0,
+              secretsCount: 0,
+              authAnomaliesCount: 0,
+            },
+          });
+        }
+        if (flags.proposals) {
+          set({
+            proposals: {},
+            proposalOrder: [],
+            activeProposalFlowId: null,
+            activeDiffProposal: null,
+          });
+        }
+        if (flags.intruder_jobs) {
+          set({
+            activeIntruderJob: null,
+            intruderResults: [],
+          });
+        }
+        if (flags.curated_payloads) {
+          set({
+            payloadGroups: {},
+            activeMatrixJob: null,
+          });
+        }
+      }
+      return result;
+    } catch (err: any) {
+      console.error('Clear data failed:', err);
+      throw err;
+    }
+  },
 
   updateMatrixCase: (caseId: string, updates: Partial<TestMatrixCase>) => {
     set((state) => {
@@ -793,6 +922,58 @@ export const useFlowStore = create<FlowStoreState>((set, get) => ({
 
   selectRule: (id: string | null) => set({ activeRuleId: id }),
 
+  syncRulesFromBackend: async () => {
+    try {
+      const result = await api.listRules();
+      if (result?.rules && Array.isArray(result.rules)) {
+        const backendRules: Record<string, CustomRule> = {};
+        const backendOrder: string[] = [];
+        result.rules.forEach((r: any) => {
+          const rule: CustomRule = {
+            id: r.id,
+            name: r.name,
+            description: r.description || '',
+            severity: r.severity || 'MEDIUM',
+            enabled: r.enabled ?? true,
+            tags: Array.isArray(r.tags) ? r.tags : [],
+            match_logic: r.match_logic || (r.condition_combinator === 'any' ? 'ANY' : 'ALL'),
+            conditions: Array.isArray(r.conditions) ? r.conditions.map((c: any, i: number) => ({
+              id: c.id || `cond-${r.id}-${i}`,
+              field: c.field,
+              operator: c.operator,
+              key: c.key,
+              value: c.value ?? '',
+              case_sensitive: c.case_sensitive ?? false,
+            })) : [],
+            matches_count: r.matches_count || 0,
+            created_at: r.created_at || new Date().toISOString(),
+            updated_at: r.updated_at || new Date().toISOString(),
+          };
+          backendRules[rule.id] = rule;
+          backendOrder.push(rule.id);
+        });
+        set((state) => {
+          // Merge: keep any user-created rules not in backend, override with backend versions
+          const mergedRules = { ...backendRules };
+          state.ruleOrder.forEach((id) => {
+            if (!mergedRules[id] && state.rules[id]) {
+              // User-created rule not in backend — keep it
+              mergedRules[id] = state.rules[id];
+            }
+          });
+          const mergedOrder = [...backendOrder, ...state.ruleOrder.filter((id) => !backendRules[id])];
+          return {
+            rules: mergedRules,
+            ruleOrder: mergedOrder,
+            activeRuleId: state.activeRuleId || mergedOrder[0] || null,
+          };
+        });
+      }
+    } catch (err) {
+      // Backend unavailable — keep current rules (likely empty on first load)
+    }
+  },
+
   setDiffPair: (flowAId: string | null, flowBId: string | null) => {
     set({ diffFlowAId: flowAId, diffFlowBId: flowBId });
   },
@@ -859,20 +1040,23 @@ export const useFlowStore = create<FlowStoreState>((set, get) => ({
       const result = await api.approveAndRunProposal(id);
       if (result) {
         const updatedProposal = result.proposal || proposal;
+        const baselineFlow = state.flows[proposal.flow_id];
+        const baselineStatus = baselineFlow?.response_status ?? baselineFlow?.response_status_code ?? 0;
+        const execStatus = result.executed_flow?.response_status ?? result.diff?.flow_b?.response_status ?? 0;
         const execResult: ProposalExecutionResult = result.proposal?.execution_result || {
-          status_code: result.executed_flow?.response_status || result.diff?.flow_b?.response_status || 200,
-          status_delta: result.diff?.status_delta || '200 == 200',
-          length_delta_bytes: result.diff?.length_delta_bytes || 0,
-          latency_delta_ms: result.diff?.latency_delta_ms || 0,
+          status_code: execStatus,
+          status_delta: result.diff?.status_delta ?? `${execStatus} vs ${baselineStatus}`,
+          length_delta_bytes: result.diff?.length_delta_bytes ?? 0,
+          latency_delta_ms: result.diff?.latency_delta_ms ?? 0,
           verdict_level: result.diff?.anomaly_verdict?.level || 'INFO_DIFF',
           verdict_description: result.diff?.anomaly_verdict?.description || '',
           executed_flow_id: result.executed_flow?.id,
         };
 
         const diffSummary: ProposalDiffSummary = {
-          status_code: execResult.status_code || 200,
-          length_delta: execResult.length_delta_bytes || 0,
-          latency_ms: execResult.latency_delta_ms || 0,
+          status_code: execResult.status_code ?? 0,
+          length_delta: execResult.length_delta_bytes ?? 0,
+          latency_ms: execResult.latency_delta_ms ?? 0,
           reflected: !!execResult.reflected,
           anomaly_flag: execResult.verdict_level || null,
           status_delta: execResult.status_delta,
@@ -1079,6 +1263,65 @@ export const useFlowStore = create<FlowStoreState>((set, get) => ({
     });
 
     api.toCurated(proposalId, { group_id: group?.id }).catch(() => {});
+  },
+
+  transferProposalToIntruder: async (proposalId: string) => {
+    const state = get();
+    const proposal = state.proposals[proposalId];
+    if (!proposal) return;
+
+    try {
+      const result = await api.toIntruder(proposalId);
+      if (result.ok) {
+        // Update proposal state to EXECUTING
+        set((s) => ({
+          proposals: {
+            ...s.proposals,
+            [proposalId]: {
+              ...s.proposals[proposalId],
+              state: 'EXECUTING',
+              status: 'EXECUTING',
+              updated_at: new Date().toISOString(),
+            },
+          },
+        }));
+        // Optionally switch to intruder view
+        set({ activeView: 'intruder' });
+      }
+    } catch (err) {
+      console.error('Failed to launch intruder from proposal:', err);
+    }
+  },
+
+  sweepProposalsToIntruder: async (opts?: { min_confidence?: number; max_proposals?: number }) => {
+    try {
+      const result = await api.sweepToIntruder({
+        min_confidence: opts?.min_confidence ?? 60,
+        max_proposals: opts?.max_proposals ?? 20,
+      });
+      if (result.ok && result.jobs_launched > 0) {
+        // Mark swept proposals as EXECUTING
+        const sweptIds = (result.launched || [])
+          .filter((l: any) => l.intruder_job_id)
+          .map((l: any) => l.proposal_id);
+
+        if (sweptIds.length > 0) {
+          set((s) => {
+            const updated = { ...s.proposals };
+            for (const id of sweptIds) {
+              if (updated[id]) {
+                updated[id] = { ...updated[id], state: 'EXECUTING', status: 'EXECUTING' };
+              }
+            }
+            return { proposals: updated };
+          });
+        }
+      }
+      return result;
+    } catch (err) {
+      console.error('Sweep failed:', err);
+      return { ok: false, error: String(err) };
+    }
   },
 }));
 

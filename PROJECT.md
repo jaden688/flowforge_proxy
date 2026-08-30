@@ -1,133 +1,91 @@
-# Project: FlowForge Proxy — Dynamic JSON Schema Evolution & Bug Bounty Vulnerability Triage
+# Project: FlowForge Proxy Zero-Mock & Dynamic Target Replay Hardening
 
 ## Architecture
-FlowForge Proxy is an asynchronous, high-throughput HTTP/1.1, HTTP/2, and WebSocket intercepting proxy and security testing workbench.
-This feature milestone introduces dynamic JSON schema evolution (cumulative payload merging across flows for endpoint templates), comprehensive multi-category bug bounty vulnerability triage and automated proposal synthesis (IDOR/BOLA boundary sweeps, Reflected XSS breakouts with static noise filtering, Broken Auth token stripping, Secrets/JWT `alg:none`, and Custom Rules), real-time WebSocket event broadcasting, and seamless synchronization with the Target Dossier, Threat HUD, and Operator Approval Drawer.
+FlowForge Proxy is an intelligent, high-performance security intercepting proxy and automated test workbench built with a Python (FastAPI / mitmproxy / aiosqlite / httpx) backend and a React (TypeScript / Vite / TailwindCSS / Lucide) frontend.
+The system intercepts live HTTP/HTTPS traffic, analyzes flows with passive heuristic triage rules (IDOR, reflection, auth-bypass, mass assignment), synthesizes actionable test proposals, generates ranked mutation matrices, and provides an Operator Cockpit with autonomous Auto-Pilot and human-in-the-loop approval workflows.
 
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                                 Frontend Cockpit UI                                    │
-│  - Live Traffic Stream (glowing [⚡ N Tests Staged] pulse badges, 1-click filter)       │
-│  - Threat HUD (Reflections, Predictable IDs / IDOR, Auth Deviations, Secrets, Rules)   │
-│  - Target Dossier View (Dynamic Schema Tree, Parameter Type Matrix, Sample Values)     │
-│  - Operator Approval Drawer (1-Click Replay Execution, Diff Modal, Matrix Bridge)      │
-└───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                            │ REST API & WebSocket Events (/api/v1/*)
-┌───────────────────────────────────────────▼────────────────────────────────────────────┐
-│                              FastAPI Application Layer                                 │
-│  - /api/v1/dossiers (and /api/v1/dossier) (list, get by endpoint_hash, OpenAPI export) │
-│  - /api/v1/proposals (list, stats, get, approve, execute, dismiss, batch, generate)    │
-│  - /api/v1/ws/traffic (schema_updated, proposal_created, proposal_executed, etc.)      │
-└─────────────────────┬────────────────────────────────────────────┬─────────────────────┘
-                      │                                            │
-┌─────────────────────▼────────────────────┐   ┌───────────────────▼─────────────────────┐
-│          Proxy Interception Core         │   │    Passive Vulnerability Pipeline       │
-│  - Mitmproxy DumpMaster engine           │   │  - Reflection Detector (DOM Contexts +  │
-│  - FlowForgeInterceptorAddon hooks       │   │    Static Asset Noise Filter)           │
-│  - EventBroadcaster Pub/Sub Hub          │   │  - Identifier Classifier (IDOR / BOLA)  │
-│  - Endpoint & Parameter Triage Ingestion │   │  - Auth Tracker & JWT Scanner           │
-└─────────────────────┬────────────────────┘   │  - Dynamic Schema Inferrer & Merger     │
-                      │                        │  - Custom YAML/JSON Rule Matcher        │
-                      │                        └───────────────────┬─────────────────────┘
-                      │                                            │
-                      │                        ┌───────────────────▼─────────────────────┐
-                      │                        │       Proposal Synthesizer Engine       │
-                      │                        │  - Synthesizes XSS context breakouts    │
-                      │                        │  - Synthesizes IDOR boundary sweeps     │
-                      │                        │  - Synthesizes Auth drop/swap probes    │
-                      │                        │  - Synthesizes JWT alg:none probes      │
-                      │                        │  - Synthesizes Mass Assignment probes   │
-                      │                        └───────────────────┬─────────────────────┘
-                      │                                            │
-┌─────────────────────▼────────────────────────────────────────────▼─────────────────────┐
-│                     Storage & Persistence Layer (SQLite + WAL)                         │
-│  - AsyncDBWriter (single-writer queue for atomic batch upsert)                         │
-│  - Tables: flows, endpoints, parameters, proposals, curated_payloads                   │
-│  - Repository: FlowRepository (cumulative schema merge, queries, stats, replay diffs)  │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
+### Core Data Flow
+1. **Interception**: Mitmproxy core intercepts external traffic -> writes raw flow telemetry to SQLite FTS5 database -> broadcasts events over WebSocket `/ws/traffic`.
+2. **Analysis & Synthesis**: Passive triage engine analyzes flows -> generates ranked test proposals (`TestProposal`) and mutation matrices (`MatrixJob`).
+3. **Execution & Replay**:
+   - Proposal Replay (`POST /api/v1/proposals/{id}/execute`): Reconstructs original request method, scheme, host, port, path, headers, and params -> executes against the live target -> computes semantic and byte deltas.
+   - Single Flow Replay (`POST /api/v1/flows/{id}/replay`): Reconstructs absolute target URL -> replays flow -> updates live telemetry.
+   - Matrix Runner (`POST /api/v1/matrix/execute`): Dynamically resolves baseline flows per test case -> constructs authentic target URLs -> executes concurrent mutation matrix -> persists executed flow records.
+4. **Autonomous Operator Control**: Operator Cockpit Auto-Pilot executes verified proposals sequentially with human-observable pacing, configurable rate limits, live HUD telemetry logging, and safety brakes.
+
+---
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
-| 1 | Dynamic JSON Schema Evolution & Field Merging | Evolving cumulative JSON schema across multiple flows for endpoint templates, tracking field types, type unions, optional/required frequency, nested hierarchies, array element schemas | M1 | ORIGINAL_REQUEST §R1 |
-| 2 | Endpoint & Parameter Triage Persistence | Ingest endpoint templates, discovered parameters, and cumulative schemas into SQLite `endpoints` and `parameters` tables in real time via `AsyncDBWriter` | M1 | ORIGINAL_REQUEST §R1 |
-| 3 | Dossier REST API & WebSocket Streaming | Expose `/api/v1/dossiers` and `/api/v1/dossiers/{endpoint_hash}` with `schema_updated` and `endpoint_updated` WebSocket events | M1 | ORIGINAL_REQUEST §R1 |
-| 4 | Context-Aware Reflection Detection & Noise Filter | Context-aware reflection detection across HTML body, attribute, JS string, script context; filter static asset tokens (.js, .css, images, fonts) to eliminate false positives | M2 | ORIGINAL_REQUEST §R2 |
-| 5 | IDOR / BOLA Predictable Identifier Triage | Detect sequential integers, UUID patterns, numeric params and auto-generate 5-point boundary sweep test proposals (`+1`, `-1`, `0`, `MAX_INT`) | M2 | ORIGINAL_REQUEST §R2 |
-| 6 | Broken Auth & Session Deviation Triage | Flag unauthenticated sensitive routes, role discrepancies, missing auth headers, and synthesize `DROP`, `USER_B`, and `ALG_NONE` test proposals | M2 | ORIGINAL_REQUEST §R2 |
-| 7 | High-Entropy Tokens & Secret Leakage | Dissect JWTs, API keys, bearer tokens with expiration checks and signature forgery probes (`alg: none`) | M2 | ORIGINAL_REQUEST §R2 |
-| 8 | Custom Rule Engine & Mass Assignment Triage | Evaluate dynamic user-defined YAML/JSON rules across all intercepted traffic and emit matching tags and high-priority proposals; detect privilege escalation attributes | M2 | ORIGINAL_REQUEST §R2 |
-| 9 | Target Dossier Dynamic Schema UI | Dynamically update JSON Schema tree, parameter type matrix, and observed value samples in real time as new flows arrive over WebSocket | M3 | ORIGINAL_REQUEST §R3 |
-| 10 | Threat HUD & Live Stream Badges UI | Accurately count and display all anomaly/vulnerability categories with 1-click filter tabs, glowing `[⚡ N Tests Staged]` badges, and slide-out approval drawer | M3 | ORIGINAL_REQUEST §R3 |
-| 11 | Multi-layer Decoders & Quick Triggers UI | Seamless multi-pass decoding (JWT, Base64, URL, Hex, HTML) and quick-action triggers across headers, query parameters, and schema fields | M3 | ORIGINAL_REQUEST §R3 |
-| 12 | 4-Tier Automated Verification & Test Suite | Comprehensive pytest suite covering dynamic schema merging, IDOR boundary sweep generation, static reflection filtering, auth bypass probes, dossier API/WS streaming, and replay diff execution | M4 | ORIGINAL_REQUEST §R4 |
-| 13 | Final Verification & Forensic Audit | Assert 100% pytest pass rate, 0-error `npm run build`, and Forensic Auditor integrity verification | M4 | ORIGINAL_REQUEST §R4 |
+| 1 | Dynamic Target Replay in Flow Replay | Construct dynamic absolute URLs from `flow.request.url` or `scheme://server_host:server_port/path` for relative captured paths without loopback. | M1 | R1 / Survey |
+| 2 | Dynamic Matrix Per-Case Baseline Resolution | Cache and resolve baseline flows individually for each matrix test case rather than using only the first case or defaulting to localhost. | M1 | R1 / Survey |
+| 3 | Matrix Target URL Construction | Build target URLs dynamically per case from baseline flow scheme/host/port and endpoint path, eliminating hardcoded `127.0.0.1:8000` fallback. | M1 | R1 / Survey |
+| 4 | Matrix Executed Flow Persistence | Construct and persist `FlowRecord` for matrix executions into `db_writer` so matrix runs appear in Live Traffic Stream and Diff Viewer. | M1 | R1 / Survey |
+| 5 | Query Parameter Deduplication | Strip query string from base URL when passing `params=query_params` to `httpx.request()` in `proposals.py` and `matrix.py` to prevent duplicate query params. | M1 | R1 / Survey |
+| 6 | Hop-by-Hop Header Stripping | Strip `Host` and `Content-Length` headers before dispatching mutated requests in `proposals.py` and `matrix.py` to avoid routing/length mismatch errors. | M1 | R1 / Survey |
+| 7 | Intruder Bridge Dynamic Target Resolution | Dynamically extract target scheme, host, and port from proposal/flow in `bridge.py` instead of hardcoded `http://127.0.0.1:8000`. | M1 | R1 / Survey |
+| 8 | Frontend API Replay Route Alignment | Route `api.replayRequest` and `api.replayFlow` to backend `POST /api/v1/flows/{id}/replay` and add 1-Click Replay action in `SplitInspector.tsx`. | M1 | R1 / Survey |
+| 9 | Auto-Pilot Pacing Control Loop | Replace unconfigurable 2500ms `setInterval` with safe recursive `setTimeout` + execution lock; add configurable pacing delay selector (500ms/1000ms/2000ms/5000ms/slider). | M2 | R2 / Survey |
+| 10 | Auto-Pilot Safety Brakes & Filters | Add "Stop on Anomaly" safety brake, configurable minimum confidence threshold slider (0-100%), and category filters (ALL, IDOR, REFLECTION, AUTH, MASS_ASSIGNMENT). | M2 | R2 / Survey |
+| 11 | Human-Observable Batch Approvals | Paced sequential execution in `handleRunAllPending` and `ProposalApprovalDrawer` with inter-step delay, progress counter, and cancellation. | M2 | R2 / Survey |
+| 12 | Live HUD Telemetry Event Log | Connect Cockpit HUD `autoLog` to WebSocket `proposal_executed` stream and format entries with HTTP status, latency delta (ms), size delta (bytes), and verdict tags. | M2 | R2 / Survey |
+| 13 | UI Telemetry & Status Fallback Polish | Replace `|| 45` latency and `|| 200` response status fallbacks with authentic `??` expressions in `SplitInspector.tsx` and `DiffViewer.tsx`. | M3 | R3 / Survey |
+| 14 | Error Handling Cleanliness in Custom Send | Return proper error status codes and detail instead of dummy `status_code: 200` on connection failures in `flows.py:send_custom_request`. | M3 | R3 / Survey |
+| 15 | Full Regression & Zero-Mock Verification | Run `pytest -v tests/` (383/383 passing), `npm run build` (0 errors), adversarial verification, and forensic audit. | M4 | R3 / Acceptance |
+
+---
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| M1 | Dynamic JSON Schema Evolution & Dossier Persistence (Backend) | SchemaInferrer cumulative merging, type unions, optional/required frequencies, Addon triage ingestion into SQLite endpoints/parameters, FlowRepository query methods, Dossier REST/WS routes | None | PLANNED |
-| M2 | Multi-Category Vulnerability Triage & Bounty Synthesizer (Backend) | Static asset reflection noise filtering, IDOR boundary sweep proposals, Auth drop/swap proposals, JWT alg:none proposals, Custom rules & Mass assignment triage | M1 | PLANNED |
-| M3 | Dynamic Schema & Vulnerability Synchronization in UI (Frontend) | Target Dossier real-time schema tree & parameter matrix, Threat HUD 1-click filter tabs, glowing staged badges, decoders & triggers | M1, M2 | PLANNED |
-| M4 | Comprehensive E2E Verification & Forensic Victory Audit | 4-Tier automated test suite (pytest), clean TypeScript build (`npm run build`), and Forensic Integrity Audit | M1, M2, M3 | PLANNED |
+| M1 | Dynamic Target Replay & Matrix Routing | Backend `matrix.py`, `proposals.py`, `flows.py`, `bridge.py`, `proxy.py`, frontend `api.ts`, `SplitInspector.tsx` | none | DONE |
+| M2 | Human-Observable Auto-Pilot & Operator Control | Frontend `OperatorCockpit.tsx`, `ProposalApprovalDrawer.tsx`, `flowStore.ts` | M1 | DONE |
+| M3 | Zero-Mock Pipeline Polish & Fallback Cleanup | Frontend `SplitInspector.tsx`, `DiffViewer.tsx`, backend `flows.py` | M1, M2 | DONE |
+| M4 | Comprehensive Verification & Forensic Audit | Pytest 401 tests, npm run build, Challenger verification, Forensic Auditor verification | M1, M2, M3 | DONE |
+
+---
 
 ## Interface Contracts
 
-### Backend ↔ Frontend REST API
-- `GET /api/v1/dossiers` (alias `/api/v1/dossier`) $\to$ `{ endpoints: EndpointDossier[], total: int }`
-- `GET /api/v1/dossiers/{endpoint_hash}` $\to$ `EndpointDossier` (with cumulative JSON schema, parameter catalog, observed values)
-- `GET /api/v1/proposals?flow_id={id}&state={state}&anomaly_type={type}&severity={sev}&search={q}&page={p}&page_size={s}` $\to$ `{ items: TestProposal[], total: int, page: int, page_size: int, total_pages: int }`
-- `GET /api/v1/proposals/stats` $\to$ `{ total: int, pending: int, approved: int, executing: int, completed: int, dismissed: int, by_category: Record<string, int> }`
-- `POST /api/v1/proposals/{id}/execute` $\to$ `{ proposal: TestProposal, executed_flow: FlowRecord, diff: FlowComparisonResult }`
+### Backend Matrix Execution Request Contract (`POST /api/v1/matrix/execute`)
+- Input:
+  ```json
+  {
+    "job_id": "string",
+    "case_ids": ["string"],
+    "target_url": "optional string",
+    "concurrency": 5
+  }
+  ```
+- Target Resolution:
+  1. If `target_url` provided: `target_url.rstrip("/") + case.endpoint_path`
+  2. Else if `case.baseline_flow_id` present: Resolve baseline flow from repository -> construct `scheme://server_host:server_port/case.endpoint_path` -> strip query from URL base when passing `params=query_params`.
+  3. Else: mark case `status="FAILED"`, `anomaly_flag="MISSING_TARGET_URL"`.
 
-### WebSocket Events (`/api/v1/ws/traffic`)
-- `schema_updated`: `{ event: "schema_updated", endpoint_hash: string, data: { host: string, method: string, path_template: string, request_schema: dict, response_schema: dict, parameter_count: int } }`
-- `proposal_created`: `{ event: "proposal_created", flow_id: string, data: { flow_id: string, proposal_count: int, top_severity: string, proposals: TestProposal[] } }`
-- `proposal_executed`: `{ event: "proposal_executed", flow_id: string, data: { proposal_id: string, state: "COMPLETED", verdict_level: string, verdict_description: string, length_delta_bytes: int, status_delta: string, latency_ms: float } }`
+### Proposal Execution Request Contract (`POST /api/v1/proposals/{id}/execute`)
+- Target Resolution:
+  - Extract baseline flow -> construct fully qualified URL `scheme://server_host:server_port/endpoint_path` -> clean URL query before passing `params=query_params` -> strip `Host` and `Content-Length` headers -> execute via `httpx.AsyncClient`.
+
+### Auto-Pilot Pacing Contract (Frontend Cockpit)
+- State Variables:
+  - `pacingDelayMs: number` (Default: `2000`, selectable: `500`, `1000`, `2000`, `5000` or custom slider)
+  - `minConfidence: number` (Default: `60`, range: `0` to `100`)
+  - `stopOnAnomaly: boolean` (Default: `true`)
+  - `autoPilotCategory: string` (Default: `'ALL'`)
+- Loop Behavior:
+  - Recursive `setTimeout` with `isExecutingRef` lock.
+  - Pauses execution and logs alert if `stopOnAnomaly` is true and an anomaly verdict (`CRITICAL_IDOR`, `HIGH_REFLECTION`, etc.) is returned.
+
+---
 
 ## Code Layout
-```
-flowforge_proxy/
-├── flowforge/
-│   ├── api/
-│   │   ├── app.py                     # Route registration (dossiers, proposals, flows, etc.)
-│   │   └── routes/
-│   │       ├── dossier.py             # Dossier REST endpoints (list, get, OpenAPI)
-│   │       └── proposals.py           # Proposal REST endpoints
-│   ├── core/
-│   │   ├── addon.py                   # Mitmproxy addon: triage, endpoint persistence, proposal synthesis
-│   │   └── broadcaster.py             # WebSocket Pub/Sub event broadcaster
-│   ├── db/
-│   │   ├── schema.py                  # SQLite tables: endpoints, parameters, proposals, flows
-│   │   ├── writer.py                  # Async single-writer queue
-│   │   └── repository.py              # FlowRepository (list_endpoints, get_endpoint_by_hash, merge_schema)
-│   ├── heuristics/
-│   │   ├── schema_inferrer.py         # Dynamic JSON schema inference & cumulative merging engine
-│   │   ├── reflection_detector.py     # Reflection detection with static asset noise filter
-│   │   ├── identifier_classifier.py   # IDOR/BOLA classification & boundary generator
-│   │   ├── auth_tracker.py            # Auth deviation tracker & bypass probe generator
-│   │   ├── token_scanner.py           # JWT & secret scanner with alg:none check
-│   │   ├── custom_rules.py            # Dynamic YAML/JSON rule evaluation engine
-│   │   └── proposal_synthesizer.py    # Automated test proposal synthesizer engine
-│   └── models/
-│       ├── dossier.py                 # Endpoint, Parameter, Dossier models
-│       ├── proposal.py                # TestProposal, ProposalState, AnomalyType models
-│       └── events.py                  # EventType enum
-├── frontend/
-│   └── src/
-│       ├── types/index.ts             # TypeScript definitions
-│       ├── store/flowStore.ts         # Zustand store (flows, proposals, dossiers, HUD)
-│       ├── services/                  # REST & WS client services
-│       └── components/
-│           ├── dossier/               # TargetDossier, SchemaTree, ParameterGrid
-│           ├── stream/                # TrafficTable with glowing badges & HUD
-│           ├── cockpit/               # Threat HUD intelligence cards
-│           └── proposals/             # Slide-out Approval Drawer, Diff Modal
-└── tests/
-    ├── tier1_features/                # Unit & feature tests
-    ├── tier2_boundaries/              # Boundary value & edge case tests
-    ├── tier3_interactions/            # Cross-module interaction tests
-    ├── tier4_application/             # Real-world E2E workflow tests
-    └── tier5_adversarial/             # Adversarial stress & security tests
-```
+- Backend Source: `flowforge/`
+  - Routes: `flowforge/api/routes/` (`flows.py`, `proposals.py`, `matrix.py`, `tools.py`, `proxy.py`, `streaming.py`, `diff.py`, `intruder.py`, `findings.py`, `curation.py`)
+  - Core: `flowforge/core/` (`bridge.py`, `intruder.py`, `storage.py`, `models.py`)
+- Frontend Source: `frontend/src/`
+  - Components: `frontend/src/components/` (`cockpit/`, `stream/`, `diff/`, `matrix/`, `intruder/`, `decoder/`, `findings/`)
+  - Store & Services: `frontend/src/store/` (`flowStore.ts`), `frontend/src/services/` (`api.ts`, `websocket.ts`)
+- Tests (Read-only / Untouched fixtures): `tests/`
+  - `tests/tier1_features/`, `tests/tier2_boundaries/`, `tests/tier3_interactions/`, `tests/tier4_application/`, `tests/tier5_adversarial/`
+- Metadata: `.agents/`

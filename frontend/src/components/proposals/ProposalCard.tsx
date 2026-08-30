@@ -17,7 +17,8 @@ import {
   Layers, 
   Eye,
   Loader2,
-  ArrowRight
+  ArrowRight,
+  Target
 } from 'lucide-react';
 
 export interface ProposalCardProps {
@@ -41,6 +42,7 @@ export const ProposalCard: React.FC<ProposalCardProps> = ({
   const dismissProposal = useFlowStore((s) => s.dismissProposal);
   const transferProposalToMatrix = useFlowStore((s) => s.transferProposalToMatrix);
   const saveProposalToCurated = useFlowStore((s) => s.saveProposalToCurated);
+  const transferProposalToIntruder = useFlowStore((s) => s.transferProposalToIntruder);
   const setActiveDiffProposal = useFlowStore((s) => s.setActiveDiffProposal);
 
   const [isRunning, setIsRunning] = useState(false);
@@ -120,6 +122,18 @@ export const ProposalCard: React.FC<ProposalCardProps> = ({
       onViewDiff(proposal);
     } else {
       setActiveDiffProposal(proposal);
+    }
+  };
+
+  const handleSweepToIntruder = async () => {
+    setErrorMsg(null);
+    setIsRunning(true);
+    try {
+      await transferProposalToIntruder(proposal.id);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Intruder launch failed');
+    } finally {
+      setIsRunning(false);
     }
   };
 
@@ -249,7 +263,7 @@ export const ProposalCard: React.FC<ProposalCardProps> = ({
           <div className="flex items-center gap-3">
             <span className="font-bold text-emerald-300 flex items-center gap-1">
               <Check className="w-3 h-3 text-emerald-400" />
-              <span>Result: {proposal.diff_summary.status_code} OK</span>
+              <span>Result: {proposal.diff_summary.status_code} {proposal.diff_summary.status_code === 200 ? 'OK' : ''}</span>
             </span>
             <span className="text-slate-400">
               Delta: {proposal.diff_summary.length_delta >= 0 ? `+${proposal.diff_summary.length_delta}` : proposal.diff_summary.length_delta} B
@@ -314,6 +328,27 @@ export const ProposalCard: React.FC<ProposalCardProps> = ({
             <Edit3 className="w-3.5 h-3.5" />
             <span>Edit in Matrix</span>
           </button>
+
+          {/* 2b. [🎯 Sweep to Intruder] */}
+          {(isPending || proposal.state === 'PENDING') && (
+            <button
+              onClick={handleSweepToIntruder}
+              disabled={isExecuting}
+              className={`px-2.5 py-1.5 rounded-lg border flex items-center gap-1.5 transition-colors text-xs ${
+                isExecuting
+                  ? 'bg-violet-900/50 text-violet-300 cursor-not-allowed opacity-75 border-violet-500/30'
+                  : 'bg-slate-800 hover:bg-slate-700 text-violet-300 border-slate-700 hover:border-violet-500/40'
+              }`}
+              title="Launch active Intruder fuzzing campaign from this proposal"
+            >
+              {isExecuting ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Target className="w-3.5 h-3.5" />
+              )}
+              <span>Sweep to Intruder</span>
+            </button>
+          )}
 
           {/* 3. [⭐ Save to Curated] */}
           <button

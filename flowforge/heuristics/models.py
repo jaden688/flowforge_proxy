@@ -152,6 +152,7 @@ class TriageSummary(BaseModel):
     identifier_findings: List[IdentifierFinding] = Field(default_factory=list)
     schema_inferred: Dict[str, Any] = Field(default_factory=dict)
     rule_matches: List[Any] = Field(default_factory=list)
+    nuclei_matches: List[Any] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
     has_high_priority_anomalies: bool = False
     analysis_duration_ms: float = 0.0

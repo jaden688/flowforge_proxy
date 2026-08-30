@@ -104,9 +104,11 @@ async def test_adversarial_concurrent_endpoint_ingestion_sqlite_integrity(tmp_db
             .replace("{id}", f"ord-{flow_idx}" if "orders" in path_tmpl else f"SKU-{flow_idx}")
         )
 
-        # Polymorphic payload variation
+        # Polymorphic payload variation — vary by iteration cycle, not flow_idx,
+        # so each endpoint template receives both int and str across cycles.
         body_dict = dict(base_data)
-        if flow_idx % 2 == 0:
+        cycle = flow_idx // len(endpoint_templates)  # 0,0,...,0, 1,1,...,1, etc.
+        if cycle % 2 == 0:
             body_dict["iteration"] = flow_idx
             body_dict["extra_meta"] = {"source": f"concur_thread_{flow_idx}", "tags": ["stress", "concurrency"]}
         else:

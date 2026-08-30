@@ -11,6 +11,7 @@ import { DiffViewer } from './components/diff/DiffViewer';
 import { ApiFlowGraph } from './components/graph/ApiFlowGraph';
 import { RuleEngineManager } from './components/rules/RuleEngineManager';
 import { FindingsView } from './components/findings/FindingsView';
+import { IntruderWorkbench } from './components/intruder/IntruderWorkbench';
 import { ProposalApprovalDrawer } from './components/proposals/ProposalApprovalDrawer';
 import { ProposalDiffModal } from './components/proposals/ProposalDiffModal';
 import { OperatorCockpit } from './components/cockpit/OperatorCockpit';
@@ -87,6 +88,7 @@ export const App: React.FC = () => {
         {activeView === 'diff' && <DiffViewer />}
         {activeView === 'graph' && <ApiFlowGraph />}
         {activeView === 'rules' && <RuleEngineManager />}
+        {activeView === 'intruder' && <IntruderWorkbench />}
       </main>
 
 

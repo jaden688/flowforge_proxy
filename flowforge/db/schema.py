@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS parameters (
 );
 CREATE INDEX IF NOT EXISTS idx_params_endpoint ON parameters(endpoint_hash, name);
 CREATE INDEX IF NOT EXISTS idx_params_name ON parameters(name);
+CREATE INDEX IF NOT EXISTS idx_params_identifier ON parameters(is_identifier, is_entropy_token);
 
 -- 5. Discovered Endpoints Catalog
 CREATE TABLE IF NOT EXISTS endpoints (
@@ -173,5 +174,76 @@ CREATE INDEX IF NOT EXISTS idx_proposals_state ON proposals(state);
 CREATE INDEX IF NOT EXISTS idx_proposals_anomaly_type ON proposals(anomaly_type);
 CREATE INDEX IF NOT EXISTS idx_proposals_severity ON proposals(severity);
 CREATE INDEX IF NOT EXISTS idx_proposals_created ON proposals(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_proposals_endpoint ON proposals(endpoint_hash);
+
+-- 9. Operator Custom Wordlists (uploaded payload/dictionary sets)
+CREATE TABLE IF NOT EXISTS custom_wordlists (
+    id TEXT PRIMARY KEY,                       -- 'wl-<uuid12>'
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    category TEXT NOT NULL DEFAULT 'attack_payloads',
+    tags TEXT DEFAULT '[]',                    -- JSON array of operator tags
+    content TEXT NOT NULL,                     -- Raw newline-separated entries
+    line_count INTEGER DEFAULT 0,              -- Usable (non-blank/non-comment) entry count
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_custom_wordlists_name ON custom_wordlists(name);
+CREATE INDEX IF NOT EXISTS idx_custom_wordlists_category ON custom_wordlists(category);
+
+-- 10. Intruder Attack Jobs (active replay campaigns)
+CREATE TABLE IF NOT EXISTS intruder_jobs (
+    id TEXT PRIMARY KEY,                       -- 'intr-<uuid12>'
+    flow_id TEXT,                              -- Source intercepted flow
+    status TEXT NOT NULL DEFAULT 'PENDING',    -- PENDING/RUNNING/COMPLETED/ABORTED/FAILED
+    config TEXT NOT NULL DEFAULT '{}',         -- JSON serialized IntruderJobConfig
+    payload_count INTEGER DEFAULT 0,           -- Total resolved payloads
+    total_requests INTEGER DEFAULT 0,          -- payload_count * injection_points
+    sent_requests INTEGER DEFAULT 0,
+    completed_requests INTEGER DEFAULT 0,
+    anomaly_count INTEGER DEFAULT 0,
+    created_at REAL NOT NULL,
+    started_at REAL,
+    finished_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_intruder_jobs_status ON intruder_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_intruder_jobs_flow ON intruder_jobs(flow_id);
+
+-- 11. Intruder Per-Payload Results
+CREATE TABLE IF NOT EXISTS intruder_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id TEXT NOT NULL REFERENCES intruder_jobs(id) ON DELETE CASCADE,
+    request_index INTEGER NOT NULL,            -- Ordinal within the campaign
+    position TEXT NOT NULL,                    -- JSON serialized InjectionPoint
+    payload TEXT NOT NULL,
+    status_code INTEGER,                       -- NULL on network error
+    response_time_ms REAL,
+    response_size_bytes INTEGER,
+    reflected INTEGER DEFAULT 0,               -- Payload echoed in response body
+    anomaly_reasons TEXT DEFAULT '[]',         -- JSON array of anomaly flags
+    error TEXT,
+    timestamp REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_intruder_results_job ON intruder_results(job_id, request_index ASC);
+CREATE INDEX IF NOT EXISTS idx_intruder_results_status ON intruder_results(job_id, status_code);
+
+-- 12. Custom Heuristic Rules
+CREATE TABLE IF NOT EXISTS custom_rules (
+    rule_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT DEFAULT '',
+    severity TEXT NOT NULL DEFAULT 'MEDIUM',
+    category TEXT NOT NULL DEFAULT 'CUSTOM',
+    tags TEXT DEFAULT '[]',                      -- JSON array of strings
+    enabled INTEGER DEFAULT 1,
+    condition_combinator TEXT DEFAULT 'all',     -- "all" | "any"
+    conditions TEXT NOT NULL DEFAULT '[]',       -- JSON array of RuleCondition
+    raw_yaml TEXT,                               -- Optional raw YAML source
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_custom_rules_severity ON custom_rules(severity);
+CREATE INDEX IF NOT EXISTS idx_custom_rules_category ON custom_rules(category);
+CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 """
 

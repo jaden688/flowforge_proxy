@@ -3,6 +3,7 @@ import { useFlowStore } from '../../store/flowStore';
 import { CustomRule, RuleSeverity } from '../../types';
 import { RuleEditor } from './RuleEditor';
 import { RuleLiveTester } from './RuleLiveTester';
+import { RuleTemplateGallery } from './RuleTemplateGallery';
 import { Badge } from '../common/Badge';
 import { 
   SlidersHorizontal, 
@@ -34,7 +35,7 @@ export const RuleEngineManager: React.FC = () => {
   const toggleRule = useFlowStore((s) => s.toggleRule);
   const selectRule = useFlowStore((s) => s.selectRule);
 
-  const [activeTab, setActiveTab] = useState<'editor' | 'tester' | 'overview'>('editor');
+  const [activeTab, setActiveTab] = useState<'editor' | 'tester' | 'overview' | 'templates'>('editor');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedSeverityFilter, setSelectedSeverityFilter] = useState<string>('ALL');
 
@@ -92,6 +93,12 @@ export const RuleEngineManager: React.FC = () => {
     };
     addRule(newRule);
     selectRule(id);
+    setActiveTab('editor');
+  };
+
+  const handleUseTemplate = (rule: CustomRule) => {
+    addRule(rule);
+    selectRule(rule.id);
     setActiveTab('editor');
   };
 
@@ -378,6 +385,18 @@ export const RuleEngineManager: React.FC = () => {
               <BarChart2 className="w-3.5 h-3.5" />
               <span>Rules Metrics</span>
             </button>
+
+            <button
+              onClick={() => setActiveTab('templates')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                activeTab === 'templates'
+                  ? 'bg-primary text-slate-950 shadow-md shadow-primary/20'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5" />
+              <span>Templates</span>
+            </button>
           </div>
 
           {activeRule && (
@@ -499,6 +518,11 @@ export const RuleEngineManager: React.FC = () => {
                       </table>
                     </div>
                   </div>
+                </div>
+              )}
+              {activeTab === 'templates' && (
+                <div className="bg-[#0B101B] border border-border rounded-xl p-4 font-mono text-xs text-slate-200 overflow-y-auto h-full">
+                  <RuleTemplateGallery onUseTemplate={handleUseTemplate} />
                 </div>
               )}
             </>

@@ -15,7 +15,8 @@ import {
   Globe,
   Network,
   SlidersHorizontal,
-  Filter
+  Filter,
+  Crosshair
 } from 'lucide-react';
 import { useFlowStore } from '../../store/flowStore';
 import { ActiveView } from '../../types';
@@ -29,7 +30,6 @@ export const HeaderNav: React.FC = () => {
   const wsLatencyMs = useFlowStore((s) => s.wsLatencyMs);
   const isPaused = useFlowStore((s) => s.isPaused);
   const setPaused = useFlowStore((s) => s.setPaused);
-  const clearFlows = useFlowStore((s) => s.clearFlows);
   const stats = useFlowStore((s) => s.stats);
   const filters = useFlowStore((s) => s.filters);
   const setFilters = useFlowStore((s) => s.setFilters);
@@ -46,6 +46,20 @@ export const HeaderNav: React.FC = () => {
 
   const [isLaunchingBrowser, setIsLaunchingBrowser] = useState(false);
   const [isReplayModalOpen, setIsReplayModalOpen] = useState(false);
+  const [isClearModalOpen, setIsClearModalOpen] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [confirmText, setConfirmText] = useState('');
+
+  // Clear dialog checkbox state
+  const [clearFlows, setClearFlows] = useState(true);
+  const [clearEndpoints, setClearEndpoints] = useState(false);
+  const [clearProposals, setClearProposals] = useState(true);
+  const [clearIntruder, setClearIntruder] = useState(true);
+  const [clearWordlists, setClearWordlists] = useState(false);
+  const [clearCurated, setClearCurated] = useState(false);
+  const [systemStats, setSystemStats] = useState<Record<string, number> | null>(null);
+
+  const clearCapturedData = useFlowStore((s) => s.clearCapturedData);
 
   const [replayMethod, setReplayMethod] = useState('GET');
   const [replayUrl, setReplayUrl] = useState('https://');
@@ -61,6 +75,7 @@ export const HeaderNav: React.FC = () => {
     { id: 'diff', label: 'Diff Viewer', icon: <GitCompare className="w-4 h-4" /> },
     { id: 'graph', label: 'Flow Graph', icon: <Network className="w-4 h-4" /> },
     { id: 'rules', label: 'Rule Engine', icon: <SlidersHorizontal className="w-4 h-4" /> },
+    { id: 'intruder', label: 'Intruder', icon: <Crosshair className="w-4 h-4 text-rose-400" /> },
   ];
 
 
@@ -80,6 +95,39 @@ export const HeaderNav: React.FC = () => {
       setIsReplaying(false);
     }
   };
+
+  const handleClear = async () => {
+    setIsClearing(true);
+    try {
+      await clearCapturedData({
+        flows: clearFlows,
+        endpoints: clearEndpoints,
+        proposals: clearProposals,
+        intruder_jobs: clearIntruder,
+        wordlists: clearWordlists,
+        curated_payloads: clearCurated,
+      });
+      setIsClearModalOpen(false);
+      setConfirmText('');
+    } catch (err: any) {
+      alert(`Clear failed: ${err.message}`);
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
+  const openClearModal = async () => {
+    setConfirmText('');
+    setIsClearModalOpen(true);
+    try {
+      const stats = await api.getSystemStats();
+      setSystemStats(stats);
+    } catch {
+      setSystemStats(null);
+    }
+  };
+
+  const anyChecked = clearFlows || clearEndpoints || clearProposals || clearIntruder || clearWordlists || clearCurated;
 
   const handleLaunchBrowser = async () => {
     setIsLaunchingBrowser(true);
@@ -255,9 +303,9 @@ export const HeaderNav: React.FC = () => {
 
           {/* Clear Stream */}
           <button
-            onClick={clearFlows}
+            onClick={openClearModal}
             className="p-2 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 transition-colors"
-            title="Clear capture stream"
+            title="Clear captured data (select categories)"
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
@@ -283,6 +331,141 @@ export const HeaderNav: React.FC = () => {
           </a>
         </div>
       </header>
+
+      {/* Selective Clear Data Dialog */}
+      <Modal
+        isOpen={isClearModalOpen}
+        onClose={() => { setIsClearModalOpen(false); setConfirmText(''); }}
+        title="Clear Captured Data"
+      >
+        <div className="space-y-4">
+          <p className="text-xs text-slate-300 font-mono leading-relaxed">
+            Select which data categories to clear. This cannot be undone.
+          </p>
+
+          {/* Category checkboxes with row counts */}
+          <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 space-y-2.5">
+            <label className="flex items-center gap-3 text-xs font-mono text-slate-300 cursor-pointer hover:text-slate-100">
+              <input
+                type="checkbox"
+                checked={clearFlows}
+                onChange={(e) => setClearFlows(e.target.checked)}
+                className="accent-rose-500"
+              />
+              <span className="flex-1">Captured Flows &amp; WebSocket Messages</span>
+              {systemStats && (
+                <span className="text-slate-500 tabular-nums">
+                  {(systemStats.flows || 0).toLocaleString()} flows, {(systemStats.websocket_messages || 0).toLocaleString()} WS msgs
+                </span>
+              )}
+            </label>
+
+            <label className="flex items-center gap-3 text-xs font-mono text-slate-300 cursor-pointer hover:text-slate-100">
+              <input
+                type="checkbox"
+                checked={clearEndpoints}
+                onChange={(e) => setClearEndpoints(e.target.checked)}
+                className="accent-rose-500"
+              />
+              <span className="flex-1">Discovered Endpoints &amp; Parameters</span>
+              {systemStats && (
+                <span className="text-slate-500 tabular-nums">
+                  {(systemStats.endpoints || 0).toLocaleString()} endpoints, {(systemStats.parameters || 0).toLocaleString()} params
+                </span>
+              )}
+            </label>
+
+            <label className="flex items-center gap-3 text-xs font-mono text-slate-300 cursor-pointer hover:text-slate-100">
+              <input
+                type="checkbox"
+                checked={clearProposals}
+                onChange={(e) => setClearProposals(e.target.checked)}
+                className="accent-rose-500"
+              />
+              <span className="flex-1">Auto-Proposals &amp; Findings</span>
+              {systemStats && (
+                <span className="text-slate-500 tabular-nums">
+                  {(systemStats.proposals || 0).toLocaleString()} proposals
+                </span>
+              )}
+            </label>
+
+            <label className="flex items-center gap-3 text-xs font-mono text-slate-300 cursor-pointer hover:text-slate-100">
+              <input
+                type="checkbox"
+                checked={clearIntruder}
+                onChange={(e) => setClearIntruder(e.target.checked)}
+                className="accent-rose-500"
+              />
+              <span className="flex-1">Intruder Jobs &amp; Results</span>
+              {systemStats && (
+                <span className="text-slate-500 tabular-nums">
+                  {(systemStats.intruder_jobs || 0).toLocaleString()} jobs, {(systemStats.intruder_results || 0).toLocaleString()} results
+                </span>
+              )}
+            </label>
+
+            <label className="flex items-center gap-3 text-xs font-mono text-slate-300 cursor-pointer hover:text-slate-100">
+              <input
+                type="checkbox"
+                checked={clearWordlists}
+                onChange={(e) => setClearWordlists(e.target.checked)}
+                className="accent-rose-500"
+              />
+              <span className="flex-1">Uploaded Wordlists</span>
+              {systemStats && (
+                <span className="text-slate-500 tabular-nums">
+                  {(systemStats.custom_wordlists || 0).toLocaleString()} wordlists
+                </span>
+              )}
+            </label>
+
+            <label className="flex items-center gap-3 text-xs font-mono text-slate-300 cursor-pointer hover:text-slate-100">
+              <input
+                type="checkbox"
+                checked={clearCurated}
+                onChange={(e) => setClearCurated(e.target.checked)}
+                className="accent-rose-500"
+              />
+              <span className="flex-1">Curated Payloads &amp; Groups</span>
+              <span className="text-slate-500">in-memory</span>
+            </label>
+          </div>
+
+          {/* Typing confirmation */}
+          {anyChecked && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-mono text-slate-400">
+                Type <span className="text-rose-400 font-bold">CLEAR</span> to confirm:
+              </label>
+              <input
+                type="text"
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                placeholder="Type CLEAR"
+                className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-200 placeholder-slate-600 focus:outline-none focus:border-rose-500"
+              />
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+            <button
+              onClick={() => { setIsClearModalOpen(false); setConfirmText(''); }}
+              className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleClear}
+              disabled={isClearing || !anyChecked || confirmText !== 'CLEAR'}
+              className="px-4 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold flex items-center gap-1.5"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              {isClearing ? 'Clearing…' : 'Clear Selected'}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Manual Request Replay Modal */}
       <Modal

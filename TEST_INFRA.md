@@ -1,36 +1,35 @@
-# E2E Test Infra: FlowForge Proxy — Auto-Find, Live Highlighting & Operator Approval Pipeline
+# E2E Test Infra: FlowForge Proxy - Nuclei Engine & Real Data Decoder Verification
 
 ## Test Philosophy
-- Opaque-box, requirement-driven. Derived from verbatim user specifications in `ORIGINAL_REQUEST.md`.
-- No dependency on internal implementation details; exercises public REST APIs, WebSocket streams, and end-to-end replay pipelines.
-- Systematic 4-tier methodology: Category-Partition, Boundary Value Analysis, Pairwise Combinatorial, and Real-World Application Workloads.
+- Opaque-box, requirement-driven testing against real SQLite persistence, live HTTP proxies, authentic cryptography, and real HTTP replay targets.
+- Zero mocks, zero stubs, zero fake sample data.
+- 4-Tier Test Architecture: Category-Partition (Tier 1), Boundary Value Analysis (Tier 2), Cross-Module Interactions (Tier 3), Real-World Pen-Test Workflows (Tier 4), Adversarial Coverage (Tier 5).
 
 ## Feature Inventory
-| # | Feature | Source (requirement) | Tier 1 | Tier 2 | Tier 3 |
-|---|---------|---------------------|:------:|:------:|:------:|
-| 1 | Automated Proposal Synthesis across Anomalies (Reflections, IDORs, Auth, JSON) | Follow-up R1 | 6 | 3 | ✓ |
-| 2 | Proposal Management REST API (List/Filter, Get, Dismiss, Batch, Stats) | Follow-up R1 | 5 | 2 | ✓ |
-| 3 | 1-Click Approve & Run, Replay Execution & Diff Delta Engine | Follow-up R3 | 5 | 1 | ✓ |
-| 4 | Curated Collections & Matrix Builder Transfer Bridges | Follow-up R3 | 5 | 1 | ✓ |
-| 5 | WebSocket Real-Time Event Broadcasting & Badge Streaming | Follow-up R1, R2 | 5 | 1 | ✓ |
+| # | Feature | Source | Tier 1 | Tier 2 | Tier 3 | Tier 4 |
+|---|---------|--------|:------:|:------:|:------:|:------:|
+| 1 | Nuclei Template Models & Schemas | ORIGINAL_REQUEST §R1 | 5 | 3 | ✓ | ✓ |
+| 2 | Multi-Root Discovery (`flowforge/` & `data/wordlists/`) | ORIGINAL_REQUEST §R1 | 5 | 5 | ✓ | ✓ |
+| 3 | Template ID Deduplication & Overrides | ORIGINAL_REQUEST §R1 | 5 | 4 | ✓ | ✓ |
+| 4 | Passive Flow Matcher (Status/Words/Regex/Headers) | ORIGINAL_REQUEST §R1 | 5 | 5 | ✓ | ✓ |
+| 5 | Triage Summary & Threat HUD Stats | ORIGINAL_REQUEST §R1 | 5 | 3 | ✓ | ✓ |
+| 6 | Staged Test Proposal Synthesis (`[Nuclei] {name}`) | ORIGINAL_REQUEST §R1 | 5 | 4 | ✓ | ✓ |
+| 7 | Nuclei REST API Endpoints (`/api/v1/nuclei/*`) | ORIGINAL_REQUEST §R1 | 5 | 3 | ✓ | ✓ |
+| 8 | Authentic Decoder Live Flow Processing | ORIGINAL_REQUEST §R2 | 5 | 5 | ✓ | ✓ |
+| 9 | Zero Fake Data / Mock Compliance Audit | ORIGINAL_REQUEST §R2 | 5 | 5 | ✓ | ✓ |
+| 10 | Real-World CVE Auto-Find & Operator Approval E2E | ORIGINAL_REQUEST §R1, §R2 | - | - | - | 5 |
 
 ## Test Architecture
-- **Test Runner**: Pytest (`pytest -v tests/`) with isolated async execution hook in `tests/conftest.py`.
-- **Reference Target App**: Fully functional FastAPI application (`tests/target_app.py`) exposing reflection, IDOR, auth, and state mutation endpoints.
-- **Synthetic Traffic Generator**: `SyntheticTrafficGenerator` in `tests/generator.py`.
-- **Frontend Verification**: `npm run build` (`tsc && vite build`) for static type checking and production bundling.
+- Backend Test Runner: `pytest -v tests/`
+- Frontend Test Runner: `npm run build` & `npx tsx frontend/tests/run_all_frontend_adversarial_suite.ts`
+- In-process target app: `tests/target_app.py`
+- Synthetic traffic generator: `tests/generator.py`
 
 ## Real-World Application Scenarios (Tier 4)
 | # | Scenario | Features Exercised | Complexity |
 |---|----------|--------------------|------------|
-| 1 | Reflected XSS Auto-Find & Operator 1-Click Approval | Reflection detection, DOM breakout proposal synthesis, 1-click execution, diff delta, save to curated | High |
-| 2 | Sequential BOLA / IDOR Auto-Find & Matrix Escalation | Sequential integer triage, IDOR candidate proposal, transfer to Matrix Builder, range expansion, batch execution | High |
-| 3 | Auth Anomaly & JWT Forgery Operator Workflow | Auth omission detection, Drop Auth & JWT `alg: none` proposals, replay execution, sensitive data leak verification | High |
-| 4 | JSON State Mutation & Mass Assignment Workflow | Nested JSON parsing, mass assignment proposal synthesis, replay execution, role elevation verification | High |
-
-## Coverage Thresholds
-- **Tier 1**: ≥5 test cases per feature (26 tests total)
-- **Tier 2**: ≥8 boundary and corner cases
-- **Tier 3**: ≥5 cross-feature interaction pipelines
-- **Tier 4**: ≥4 realistic end-to-end application scenarios
-- **Total Minimum**: ≥43 automated tests with 100% pass rate.
+| 1 | Intercept Exposed Swagger/OpenAPI -> Passive Nuclei Match -> Threat HUD & Dossier Annotation | F1, F2, F4, F5 | Medium |
+| 2 | Intercept Debug Error Trace -> Passive Airflow/Django Match -> Proposal Staging | F3, F4, F6 | Medium |
+| 3 | Operator Approves Nuclei Active Probe -> Replay Execution -> Confirmed CVE Diff | F6, F7, F10 | High |
+| 4 | Intercept Live Flow with JWT -> Decode Header/Claims -> Mutate Claims -> Replay | F8, F9, F10 | High |
+| 5 | Custom Arsenal Template Overrides Builtin -> Deduplication & Custom Match Execution | F2, F3, F4, F6, F10 | High |

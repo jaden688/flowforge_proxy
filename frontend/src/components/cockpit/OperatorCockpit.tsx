@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useFlowStore } from '../../store/flowStore';
 import { ProposalCard } from '../proposals/ProposalCard';
 import { MultiLayerDecoderModal } from '../decoder/MultiLayerDecoderModal';
@@ -8,6 +8,7 @@ import {
   Zap, 
   Sparkles, 
   ShieldAlert, 
+  Shield,
   Key, 
   Lock, 
   Play, 
@@ -23,14 +24,19 @@ import {
   Database,
   Search,
   Filter,
-  CheckCheck
+  CheckCheck,
+  StopCircle,
+  XCircle,
+  Sliders,
+  Activity
 } from 'lucide-react';
 import { api } from '../../services/api';
-import { TestProposal } from '../../types';
+import { TestProposal, TelemetryLogEntry } from '../../types';
 
 export const OperatorCockpit: React.FC = () => {
   const flows = useFlowStore((s) => s.flows);
   const flowOrder = useFlowStore((s) => s.flowOrder);
+  const selectedFlowId = useFlowStore((s) => s.selectedFlowId);
   const stats = useFlowStore((s) => s.stats);
   const proposals = useFlowStore((s) => s.proposals);
   const proposalOrder = useFlowStore((s) => s.proposalOrder);
@@ -38,16 +44,37 @@ export const OperatorCockpit: React.FC = () => {
   const dismissProposal = useFlowStore((s) => s.dismissProposal);
   const setActiveView = useFlowStore((s) => s.setActiveView);
   const setFilters = useFlowStore((s) => s.setFilters);
+  const telemetryLogs = useFlowStore((s) => s.telemetryLogs);
+  const addTelemetryLog = useFlowStore((s) => s.addTelemetryLog);
+  const clearTelemetryLogs = useFlowStore((s) => s.clearTelemetryLogs);
 
   const [activeFilter, setActiveFilter] = useState<'ALL' | 'REFLECTION' | 'IDOR' | 'AUTH' | 'COMPLETED'>('ALL');
   const [autoPilotEnabled, setAutoPilotEnabled] = useState(false);
+  const [autoPilotPacingMs, setAutoPilotPacingMs] = useState(2000);
+  const [stopOnAnomaly, setStopOnAnomaly] = useState(true);
+  const [minConfidence, setMinConfidence] = useState(60);
+  const [autoPilotCategory, setAutoPilotCategory] = useState<'ALL' | 'IDOR' | 'REFLECTION' | 'AUTH' | 'MASS_ASSIGNMENT'>('ALL');
+
   const [isBatchRunning, setIsBatchRunning] = useState(false);
   const [decoderText, setDecoderText] = useState('');
   const [isDecoderOpen, setIsDecoderOpen] = useState(false);
-  const [autoLog, setAutoLog] = useState<string[]>([
-    'System initialized. Heuristic proposal pipeline active.',
-    'Monitoring intercepted proxy stream for reflection contexts and IDOR candidates.',
-  ]);
+
+  // Execution lock and scheduler refs
+  const isExecutingRef = useRef(false);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const abortBatchRef = useRef(false);
+
+  // Synchronized refs for background execution loop
+  const autoPilotEnabledRef = useRef(autoPilotEnabled);
+  autoPilotEnabledRef.current = autoPilotEnabled;
+  const pacingMsRef = useRef(autoPilotPacingMs);
+  pacingMsRef.current = autoPilotPacingMs;
+  const minConfidenceRef = useRef(minConfidence);
+  minConfidenceRef.current = minConfidence;
+  const stopOnAnomalyRef = useRef(stopOnAnomaly);
+  stopOnAnomalyRef.current = stopOnAnomaly;
+  const categoryRef = useRef(autoPilotCategory);
+  categoryRef.current = autoPilotCategory;
 
   const proposalList = Object.values(proposals);
   const pendingProposals = proposalList.filter((p) => p.status === 'PENDING' || p.state === 'PENDING');
@@ -82,53 +109,220 @@ export const OperatorCockpit: React.FC = () => {
     return true;
   });
 
-
-
-  // Auto-Pilot Execution Loop: When active, auto-approves pending proposals
+  // Auto-Pilot Execution Loop: Recursive setTimeout with execution lock and state decoupling
   useEffect(() => {
-    if (!autoPilotEnabled) return;
-
-    const interval = setInterval(async () => {
-      const pendingHighConfidence = pendingProposals.filter((p) => (p.confidence_score || 70) >= 60);
-      if (pendingHighConfidence.length > 0) {
-        const next = pendingHighConfidence[0];
-        try {
-          setAutoLog((prev) => [
-            `[Auto-Pilot] Executing proposal: ${next.title} on ${next.endpoint_path}`,
-            ...prev.slice(0, 40),
-          ]);
-          await approveProposal(next.id);
-        } catch (e: any) {
-          setAutoLog((prev) => [
-            `[Auto-Pilot Error] Failed on ${next.id}: ${e.message}`,
-            ...prev.slice(0, 40),
-          ]);
-        }
+    if (!autoPilotEnabled) {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
       }
-    }, 2500);
+      isExecutingRef.current = false;
+      return;
+    }
 
-    return () => clearInterval(interval);
-  }, [autoPilotEnabled, pendingProposals, approveProposal]);
+    let isMounted = true;
+
+    const scheduleNext = (delayMs: number) => {
+      if (!isMounted || !autoPilotEnabledRef.current) return;
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(runAutoPilotStep, delayMs);
+    };
+
+    const runAutoPilotStep = async () => {
+      if (!isMounted || !autoPilotEnabledRef.current || isExecutingRef.current) {
+        return;
+      }
+
+      isExecutingRef.current = true;
+      try {
+        // Read directly from store state to decouple from component re-renders
+        const allProposals = Object.values(useFlowStore.getState().proposals);
+        
+        // Filter candidates matching pending status, confidence threshold, and scoped category
+        const eligible = allProposals.filter((p) => {
+          const isPending = p.status === 'PENDING' || p.state === 'PENDING' || !p.status;
+          if (!isPending) return false;
+
+          const conf = p.confidence_score ?? 70;
+          if (conf < minConfidenceRef.current) return false;
+
+          const cat = categoryRef.current;
+          if (cat !== 'ALL') {
+            const catStr = `${p.inferred_vuln_category || ''} ${p.anomaly_type || ''} ${p.category || ''} ${p.title || ''}`.toUpperCase();
+            if (cat === 'IDOR' && !catStr.includes('IDOR') && !catStr.includes('BOLA') && !catStr.includes('SEQUENTIAL')) return false;
+            if (cat === 'REFLECTION' && !catStr.includes('REFL') && !catStr.includes('XSS')) return false;
+            if (cat === 'AUTH' && !catStr.includes('AUTH') && !catStr.includes('JWT') && !catStr.includes('ROLE')) return false;
+            if (cat === 'MASS_ASSIGNMENT' && !catStr.includes('MASS') && !catStr.includes('SCHEMA') && !catStr.includes('JSON')) return false;
+          }
+
+          return true;
+        });
+
+        if (eligible.length === 0) {
+          // No eligible proposal right now; wait for next cycle
+          scheduleNext(pacingMsRef.current);
+          return;
+        }
+
+        const next = eligible[0];
+        addTelemetryLog({
+          id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'AUTOPILOT',
+          message: `Executing proposal (${pacingMsRef.current}ms pacing): ${next.title || next.inferred_vuln_category}`,
+          method: next.method,
+          endpointPath: next.endpoint_path,
+          proposalId: next.id,
+        });
+
+        const result = await approveProposal(next.id);
+
+        const verdictLevel = result?.proposal?.execution_result?.verdict_level || 
+                             result?.diff?.anomaly_verdict?.level || 
+                             result?.execution_result?.verdict_level ||
+                             'INFO_DIFF';
+        const statusCode = result?.executed_flow?.response_status ?? 
+                           result?.diff?.flow_b?.response_status ?? 
+                           result?.proposal?.execution_result?.status_code ??
+                           result?.status_code ??
+                           200;
+        const statusDelta = result?.diff?.status_delta;
+        const lenDelta = result?.diff?.length_delta_bytes ?? result?.proposal?.execution_result?.length_delta_bytes ?? 0;
+        const latMs = result?.diff?.latency_delta_ms ?? result?.proposal?.execution_result?.latency_delta_ms ?? 0;
+
+        addTelemetryLog({
+          id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'AUTOPILOT',
+          message: `Completed ${next.method} ${next.endpoint_path}`,
+          method: next.method,
+          endpointPath: next.endpoint_path,
+          proposalId: next.id,
+          statusCode,
+          statusDelta,
+          lengthDeltaBytes: lenDelta,
+          latencyMs: latMs,
+          verdictLevel,
+          verdictDescription: result?.diff?.anomaly_verdict?.description,
+        });
+
+        // Safety Brake Trigger Check
+        const isCriticalAnomaly = verdictLevel === 'CRITICAL_IDOR' || 
+                                 verdictLevel === 'HIGH_REFLECTION' || 
+                                 verdictLevel === 'AUTH_BYPASS';
+
+        if (stopOnAnomalyRef.current && isCriticalAnomaly) {
+          setAutoPilotEnabled(false);
+          addTelemetryLog({
+            id: `log-${Date.now()}-brake`,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'SAFETY_BRAKE',
+            message: `SAFETY BRAKE TRIGGERED: Auto-Pilot halted on ${verdictLevel} (${next.endpoint_path})`,
+            method: next.method,
+            endpointPath: next.endpoint_path,
+            proposalId: next.id,
+            verdictLevel,
+            statusCode,
+          });
+          return; // Stop without scheduling next tick
+        }
+
+        // Schedule next execution step with configured pacing delay
+        scheduleNext(pacingMsRef.current);
+      } catch (err: any) {
+        addTelemetryLog({
+          id: `log-${Date.now()}-err`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'ERROR',
+          message: `Auto-Pilot execution failed: ${err.message}`,
+        });
+        scheduleNext(pacingMsRef.current);
+      } finally {
+        isExecutingRef.current = false;
+      }
+    };
+
+    // Kick off first step immediately
+    scheduleNext(100);
+
+    return () => {
+      isMounted = false;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      isExecutingRef.current = false;
+    };
+  }, [autoPilotEnabled, approveProposal, addTelemetryLog]);
 
   const handleRunAllPending = async () => {
+    if (isBatchRunning) {
+      abortBatchRef.current = true;
+      setIsBatchRunning(false);
+      return;
+    }
+
     setIsBatchRunning(true);
+    abortBatchRef.current = false;
+
     try {
-      for (const p of pendingProposals) {
+      for (let i = 0; i < pendingProposals.length; i++) {
+        if (abortBatchRef.current) {
+          addTelemetryLog({
+            id: `log-${Date.now()}-abort`,
+            timestamp: new Date().toLocaleTimeString(),
+            type: 'BATCH',
+            message: `Batch execution aborted by operator after ${i} proposals.`,
+          });
+          break;
+        }
+
+        const p = pendingProposals[i];
+        addTelemetryLog({
+          id: `log-${Date.now()}-${p.id}`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'BATCH',
+          message: `[Batch ${i + 1}/${pendingProposals.length}] Executing ${p.method} ${p.endpoint_path}...`,
+          method: p.method,
+          endpointPath: p.endpoint_path,
+          proposalId: p.id,
+        });
+
         await approveProposal(p.id);
+
+        if (i < pendingProposals.length - 1 && !abortBatchRef.current) {
+          await new Promise((resolve) => setTimeout(resolve, Math.max(500, autoPilotPacingMs)));
+        }
       }
-      setAutoLog((prev) => [
-        `[Batch] Executed ${pendingProposals.length} pending test proposals successfully.`,
-        ...prev.slice(0, 40),
-      ]);
+
+      if (!abortBatchRef.current) {
+        addTelemetryLog({
+          id: `log-${Date.now()}-done`,
+          timestamp: new Date().toLocaleTimeString(),
+          type: 'BATCH',
+          message: `Batch executed ${pendingProposals.length} pending test proposals successfully.`,
+        });
+      }
     } catch (err: any) {
-      alert(`Batch execution error: ${err.message}`);
+      addTelemetryLog({
+        id: `log-${Date.now()}-err`,
+        timestamp: new Date().toLocaleTimeString(),
+        type: 'ERROR',
+        message: `Batch execution error: ${err.message}`,
+      });
     } finally {
       setIsBatchRunning(false);
     }
   };
 
   const openQuickDecoder = (sample?: string) => {
-    if (sample) setDecoderText(sample);
+    if (sample) {
+      setDecoderText(sample);
+    } else if (selectedFlowId && flows[selectedFlowId]) {
+      const f = flows[selectedFlowId];
+      const authHdr = f.request_headers?.['authorization'] || f.request_headers?.['Authorization'];
+      setDecoderText(authHdr || f.request_body || f.response_body || f.url || '');
+    }
     setIsDecoderOpen(true);
   };
 
@@ -163,12 +357,14 @@ export const OperatorCockpit: React.FC = () => {
               onClick={() => {
                 const next = !autoPilotEnabled;
                 setAutoPilotEnabled(next);
-                setAutoLog((prev) => [
-                  `[Auto-Pilot] ${next ? 'ACTIVATED — Automatically executing verified proposals' : 'PAUSED'}`,
-                  ...prev.slice(0, 40),
-                ]);
+                addTelemetryLog({
+                  id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                  timestamp: new Date().toLocaleTimeString(),
+                  type: 'SYSTEM',
+                  message: `[Auto-Pilot] ${next ? `ACTIVATED (${autoPilotPacingMs / 1000}s pacing)` : 'PAUSED'}`,
+                });
               }}
-              className={`px-3.5 py-1.5 rounded-lg border text-xs font-mono font-bold flex items-center gap-2 transition-all shadow-md ${
+              className={`px-3 py-1.5 rounded-lg border text-xs font-mono font-bold flex items-center gap-2 transition-all shadow-md ${
                 autoPilotEnabled
                   ? 'bg-emerald-500 text-slate-950 border-emerald-400 shadow-emerald-500/20 animate-pulse'
                   : 'bg-slate-900 text-slate-400 hover:text-slate-200 border-slate-700'
@@ -179,14 +375,123 @@ export const OperatorCockpit: React.FC = () => {
               <span>{autoPilotEnabled ? '🤖 AUTO-PILOT ACTIVE' : '🤖 ENABLE AUTO-PILOT'}</span>
             </button>
 
+            {/* Pacing Speed Selector & Slider */}
+            <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs">
+              <span className="text-slate-400 font-mono text-[10px] uppercase font-bold">Pacing:</span>
+              <select
+                value={[500, 1000, 2000, 5000].includes(autoPilotPacingMs) ? autoPilotPacingMs : 'custom'}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  if (val !== 'custom') {
+                    const num = Number(val);
+                    setAutoPilotPacingMs(num);
+                    addTelemetryLog({
+                      id: `log-${Date.now()}-pace`,
+                      timestamp: new Date().toLocaleTimeString(),
+                      type: 'SYSTEM',
+                      message: `[Pacing Control] Updated execution delay to ${num / 1000}s`,
+                    });
+                  }
+                }}
+                className="bg-slate-950 border border-slate-700 text-cyan-300 rounded px-1.5 py-0.5 text-xs font-mono font-bold focus:outline-none"
+              >
+                <option value={500}>⚡ 500ms (Fast)</option>
+                <option value={1000}>⏱️ 1000ms (1.0s)</option>
+                <option value={2000}>🎯 2000ms (2.0s Default)</option>
+                <option value={5000}>🐢 5000ms (5.0s Safe)</option>
+                <option value="custom">⚙️ Custom Slider</option>
+              </select>
+
+              <input
+                type="range"
+                min={250}
+                max={10000}
+                step={250}
+                value={autoPilotPacingMs}
+                onChange={(e) => setAutoPilotPacingMs(Number(e.target.value))}
+                className="w-16 accent-cyan-400 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+                title={`Pacing delay: ${(autoPilotPacingMs / 1000).toFixed(2)}s`}
+              />
+              <span className="text-cyan-400 font-mono text-[10px] font-bold min-w-[28px]">
+                {(autoPilotPacingMs / 1000).toFixed(1)}s
+              </span>
+            </div>
+
+            {/* Stop on Anomaly Brake Toggle */}
+            <label 
+              className={`flex items-center gap-1.5 cursor-pointer border rounded-lg px-2.5 py-1 text-xs select-none transition-colors ${
+                stopOnAnomaly 
+                  ? 'bg-rose-950/30 border-rose-500/40 text-rose-300' 
+                  : 'bg-slate-900 border-slate-700 text-slate-400 hover:border-slate-600'
+              }`}
+              title="Automatically pause Auto-Pilot when a critical anomaly is detected"
+            >
+              <input
+                type="checkbox"
+                checked={stopOnAnomaly}
+                onChange={(e) => setStopOnAnomaly(e.target.checked)}
+                className="rounded bg-slate-950 border-slate-700 text-rose-500 focus:ring-0 w-3.5 h-3.5 accent-rose-500 cursor-pointer"
+              />
+              <span className="font-mono text-[10px] font-bold">
+                🛡️ Stop on Anomaly
+              </span>
+            </label>
+
+            {/* Minimum Confidence Slider */}
+            <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs">
+              <span className="text-slate-400 font-mono text-[10px] uppercase font-bold">Min Conf:</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={5}
+                value={minConfidence}
+                onChange={(e) => setMinConfidence(Number(e.target.value))}
+                className="w-14 accent-amber-400 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+                title={`Minimum confidence threshold: ${minConfidence}%`}
+              />
+              <span className="text-amber-300 font-mono text-[10px] font-bold min-w-[28px]">
+                {minConfidence}%
+              </span>
+            </div>
+
+            {/* Category Filter Selector */}
+            <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs font-mono">
+              <span className="text-slate-400 text-[10px] uppercase font-bold">Scope:</span>
+              <select
+                value={autoPilotCategory}
+                onChange={(e) => setAutoPilotCategory(e.target.value as any)}
+                className="bg-slate-950 border border-slate-700 text-amber-300 rounded px-1.5 py-0.5 text-xs font-mono font-bold focus:outline-none"
+              >
+                <option value="ALL">🌐 All Categories</option>
+                <option value="IDOR">🔥 IDOR & BOLA</option>
+                <option value="REFLECTION">✨ Reflection / XSS</option>
+                <option value="AUTH">🔒 Auth & Roles</option>
+                <option value="MASS_ASSIGNMENT">📦 Mass Assignment</option>
+              </select>
+            </div>
+
             {/* Run All Staged Button */}
             <button
               onClick={handleRunAllPending}
-              disabled={isBatchRunning || pendingProposals.length === 0}
-              className="px-3 py-1.5 rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50 text-slate-950 text-xs font-mono font-bold flex items-center gap-1.5 transition-all shadow-md shadow-primary/20"
+              disabled={pendingProposals.length === 0 && !isBatchRunning}
+              className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold flex items-center gap-1.5 transition-all shadow-md ${
+                isBatchRunning 
+                  ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-600/20' 
+                  : 'bg-primary hover:bg-primary-hover disabled:opacity-50 text-slate-950 shadow-primary/20'
+              }`}
             >
-              <Play className={`w-3.5 h-3.5 ${isBatchRunning ? 'animate-spin' : ''}`} />
-              <span>Run All Staged ({pendingProposals.length})</span>
+              {isBatchRunning ? (
+                <>
+                  <StopCircle className="w-3.5 h-3.5 animate-pulse" />
+                  <span>Cancel Batch</span>
+                </>
+              ) : (
+                <>
+                  <Play className="w-3.5 h-3.5" />
+                  <span>Run All Staged ({pendingProposals.length})</span>
+                </>
+              )}
             </button>
 
             {/* Open Multi-Format Decoder */}
@@ -196,6 +501,11 @@ export const OperatorCockpit: React.FC = () => {
             >
               <Code2 className="w-3.5 h-3.5" />
               <span>Decoder Studio</span>
+              {selectedFlowId && flows[selectedFlowId] && (
+                <span className="text-[9px] text-cyan-500 font-normal ml-1">
+                  [{flows[selectedFlowId].method} {flows[selectedFlowId].path?.split('/').pop() || 'flow'}]
+                </span>
+              )}
             </button>
           </div>
         </div>
@@ -413,25 +723,110 @@ export const OperatorCockpit: React.FC = () => {
         </div>
 
         {/* ========================================================================= */}
-        {/* 4. Live Autonomous Action Log */}
+        {/* 4. Live HUD Telemetry Event Log */}
         {/* ========================================================================= */}
         <div className="bg-slate-950 border border-slate-800/80 rounded-xl p-3 font-mono text-xs">
           <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-800/60 text-slate-400">
-            <span className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
               <Terminal className="w-3.5 h-3.5 text-primary" />
-              <span>Autonomous Operator Event Log</span>
-            </span>
-            <span className="text-[10px] text-slate-500">Live Telemetry</span>
+              <span className="font-bold text-slate-200 uppercase tracking-wider text-[11px]">
+                Live HUD Telemetry Event Stream
+              </span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400">
+                {telemetryLogs.length} events
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={clearTelemetryLogs}
+                className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors"
+              >
+                Clear Log
+              </button>
+              <span className="text-[10px] text-emerald-400 flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                Live Stream
+              </span>
+            </div>
           </div>
-          <div className="max-h-36 overflow-y-auto space-y-1 text-slate-300 select-text">
-            {autoLog.map((log, i) => (
-              <div key={i} className="leading-relaxed">
-                <span className="text-slate-600 mr-2">[{new Date().toLocaleTimeString()}]</span>
-                <span className={log.includes('Auto-Pilot') ? 'text-emerald-400' : log.includes('Error') ? 'text-rose-400' : 'text-slate-300'}>
-                  {log}
-                </span>
+
+          <div className="max-h-48 overflow-y-auto space-y-1.5 text-slate-300 select-text font-mono text-[11px] pr-1">
+            {telemetryLogs.length === 0 ? (
+              <div className="text-slate-500 text-center py-4">
+                Telemetry log initialized. Waiting for test proposal executions or stream activity...
               </div>
-            ))}
+            ) : (
+              telemetryLogs.map((log) => (
+                <div 
+                  key={log.id} 
+                  className={`p-1.5 rounded border flex flex-wrap items-center justify-between gap-2 leading-tight ${
+                    log.type === 'SAFETY_BRAKE'
+                      ? 'bg-rose-950/40 border-rose-500/50 text-rose-200'
+                      : log.type === 'ERROR'
+                      ? 'bg-red-950/30 border-red-500/40 text-red-300'
+                      : 'bg-slate-900/60 border-slate-800/80 text-slate-300'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-slate-500 text-[10px]">[{log.timestamp}]</span>
+                    
+                    {/* Type Badge */}
+                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase ${
+                      log.type === 'AUTOPILOT' ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' :
+                      log.type === 'SAFETY_BRAKE' ? 'bg-rose-500 text-slate-950 font-bold animate-pulse' :
+                      log.type === 'BATCH' ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30' :
+                      log.type === 'SYSTEM' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' :
+                      'bg-slate-800 text-slate-400'
+                    }`}>
+                      {log.type}
+                    </span>
+
+                    {/* Method & Endpoint */}
+                    {log.method && log.endpointPath && (
+                      <span className="text-slate-200 font-bold">
+                        <span className="text-amber-400 mr-1">{log.method}</span>
+                        <span>{log.endpointPath}</span>
+                      </span>
+                    )}
+
+                    <span className="text-slate-300">{log.message}</span>
+                  </div>
+
+                  {/* Telemetry Metrics Bar */}
+                  {(log.statusCode !== undefined || log.verdictLevel) && (
+                    <div className="flex items-center gap-2 text-[10px] shrink-0 font-mono">
+                      {log.statusCode !== undefined && (
+                        <span className={`px-1.5 py-0.5 rounded font-bold ${
+                          log.statusCode >= 200 && log.statusCode < 300 ? 'bg-emerald-950 text-emerald-400 border border-emerald-500/30' :
+                          log.statusCode >= 400 && log.statusCode < 500 ? 'bg-amber-950 text-amber-400 border border-amber-500/30' :
+                          'bg-rose-950 text-rose-400 border border-rose-500/30'
+                        }`}>
+                          {log.statusDelta || `${log.statusCode} OK`}
+                        </span>
+                      )}
+                      {log.lengthDeltaBytes !== undefined && (
+                        <span className="text-cyan-400">
+                          {log.lengthDeltaBytes >= 0 ? `+${log.lengthDeltaBytes}` : log.lengthDeltaBytes} B
+                        </span>
+                      )}
+                      {log.latencyMs !== undefined && (
+                        <span className="text-slate-400">{Math.round(log.latencyMs)}ms</span>
+                      )}
+                      {log.verdictLevel && (
+                        <span className={`px-1.5 py-0.5 rounded font-bold text-[9px] ${
+                          log.verdictLevel === 'CRITICAL_IDOR' ? 'bg-rose-500 text-slate-950' :
+                          log.verdictLevel === 'HIGH_REFLECTION' ? 'bg-amber-500 text-slate-950' :
+                          log.verdictLevel === 'AUTH_BYPASS' ? 'bg-purple-500 text-white' :
+                          'bg-cyan-900 text-cyan-300'
+                        }`}>
+                          {log.verdictLevel}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
           </div>
         </div>
       </div>

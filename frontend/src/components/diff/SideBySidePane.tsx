@@ -43,7 +43,7 @@ export const SideBySidePane: React.FC<SideBySidePaneProps> = ({
               <span className="font-bold text-slate-200">BASELINE (Flow A)</span>
             </div>
             <Badge variant="primary" size="sm">
-              {flowA.method} {flowA.response_status || 200}
+              {flowA.method} {flowA.response_status ?? '---'}
             </Badge>
           </div>
 
@@ -99,7 +99,7 @@ export const SideBySidePane: React.FC<SideBySidePaneProps> = ({
               <span className="font-bold text-cyan-300">MUTATED (Flow B)</span>
             </div>
             <Badge variant={flowB.response_status === 200 ? 'success' : 'danger'} size="sm">
-              {flowB.method} {flowB.response_status || 200}
+              {flowB.method} {flowB.response_status ?? '---'}
             </Badge>
           </div>
 

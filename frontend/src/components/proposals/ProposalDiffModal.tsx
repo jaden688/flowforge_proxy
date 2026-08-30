@@ -92,8 +92,8 @@ export const ProposalDiffModal: React.FC<ProposalDiffModalProps> = ({
   const exec = proposal.execution_result;
   const diffSummary = proposal.diff_summary;
 
-  const statusCode = exec?.status_code || diffSummary?.status_code || executedFlow?.response_status || 200;
-  const baselineStatus = baselineFlow?.response_status || baselineFlow?.response_status_code || 200;
+  const statusCode = exec?.status_code ?? diffSummary?.status_code ?? executedFlow?.response_status ?? (executedFlow?.response_body !== undefined ? 200 : 0);
+  const baselineStatus = baselineFlow?.response_status ?? baselineFlow?.response_status_code ?? (baselineFlow?.response_body !== undefined ? 200 : 0);
   const statusMatch = baselineStatus === statusCode;
 
   const lengthDelta = exec?.length_delta_bytes ?? diffSummary?.length_delta ?? 0;

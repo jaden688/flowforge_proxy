@@ -24,11 +24,16 @@ class AnomalyType(str, Enum):
     """Vulnerability category or anomaly surface driving the proposal."""
     REFLECTION = "REFLECTION"
     IDOR_SEQUENTIAL = "IDOR_SEQUENTIAL"
+    CROSS_ENDPOINT_IDOR = "CROSS_ENDPOINT_IDOR"
     AUTH_DEVIATION = "AUTH_DEVIATION"
     JSON_SCHEMA = "JSON_SCHEMA"
     JWT_ANOMALY = "JWT_ANOMALY"
     SECRET_EXPOSURE = "SECRET_EXPOSURE"
     CUSTOM_RULE = "CUSTOM_RULE"
+    NUCLEI_TEMPLATE = "NUCLEI_TEMPLATE"
+    CVE = "CVE"
+    EXPOSURE = "EXPOSURE"
+    MISCONFIG = "MISCONFIG"
 
 
 class ProposalSeverity(str, Enum):

@@ -283,6 +283,13 @@ async def replay_flow(
     req = flow.request
     method = (payload and payload.override_method) or req.method
     url = (payload and payload.override_url) or req.url
+    if url.startswith("/"):
+        scheme = flow.scheme or "http"
+        host = flow.server_host
+        port = flow.server_port
+        port_str = f":{port}" if (port and port not in (80, 443)) else ""
+        url = f"{scheme}://{host}{port_str}{url}"
+
     headers = dict(req.headers)
     if payload and payload.override_headers:
         headers.update(payload.override_headers)
@@ -291,7 +298,9 @@ async def replay_flow(
 
     # Remove hop-by-hop headers
     headers.pop("host", None)
+    headers.pop("Host", None)
     headers.pop("content-length", None)
+    headers.pop("Content-Length", None)
 
     settings = get_settings()
     proxy_url = f"http://{settings.proxy_host}:{settings.proxy_port}" if settings.auto_start_proxy else None
@@ -338,7 +347,9 @@ async def send_custom_request(payload: CustomSendRequest) -> Dict[str, Any]:
 
     headers = dict(payload.headers or {})
     headers.pop("host", None)
+    headers.pop("Host", None)
     headers.pop("content-length", None)
+    headers.pop("Content-Length", None)
 
     start_time = time.time()
     try:
@@ -368,10 +379,11 @@ async def send_custom_request(payload: CustomSendRequest) -> Dict[str, Any]:
             }
     except Exception as exc:
         return {
-            "ok": True,
+            "ok": False,
             "status": "queued_or_sent",
-            "status_code": 200,
-            "detail": f"Dispatched: {exc}",
+            "status_code": 0,
+            "error": str(exc),
+            "detail": f"Dispatch failed: {exc}",
             "headers": headers,
             "body": payload.body or "",
             "duration_ms": (time.time() - start_time) * 1000.0,

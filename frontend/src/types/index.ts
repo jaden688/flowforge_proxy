@@ -397,7 +397,106 @@ export interface FlowComparisonResult {
 // UI Navigation & Filter State
 // ============================================================================
 
-export type ActiveView = 'cockpit' | 'stream' | 'dossier' | 'matrix' | 'diff' | 'settings' | 'graph' | 'rules' | 'findings';
+export type ActiveView = 'cockpit' | 'stream' | 'dossier' | 'matrix' | 'diff' | 'settings' | 'graph' | 'rules' | 'findings' | 'intruder';
+
+// ============================================================================
+// Active Intruder & Payload Management Models
+// ============================================================================
+
+export interface InjectionPoint {
+  position: 'header' | 'query' | 'body';
+  key?: string | null;
+  prefix?: string;
+  suffix?: string;
+}
+
+export interface IntruderJobConfig {
+  flow_id?: string | null;
+  method: string;
+  url: string;
+  headers?: Record<string, string>;
+  body?: string | null;
+  injection_points: InjectionPoint[];
+  custom_wordlist_ids?: string[];
+  arsenal_wordlist_ids?: string[];
+  inline_payloads?: string[];
+  concurrency?: number;
+  rate_limit_rps?: number | null;
+  timeout_seconds?: number;
+  follow_redirects?: boolean;
+}
+
+export interface IntruderJob {
+  id: string;
+  flow_id?: string | null;
+  status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'ABORTED' | 'FAILED';
+  config: IntruderJobConfig;
+  payload_count: number;
+  total_requests: number;
+  sent_requests: number;
+  completed_requests: number;
+  anomaly_count: number;
+  created_at: number;
+  started_at?: number | null;
+  finished_at?: number | null;
+}
+
+export interface IntruderResult {
+  job_id?: string;
+  request_index: number;
+  position_label: string;
+  payload: string;
+  status_code?: number | null;
+  response_time_ms?: number | null;
+  response_size_bytes?: number | null;
+  reflected: boolean;
+  anomaly_reasons: string[];
+  error?: string | null;
+  timestamp: number;
+}
+
+export interface CustomWordlist {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  tags: string[];
+  line_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ArsenalWordlist {
+  id: string;
+  name: string;
+  filename: string;
+  category: string;
+  collection: string;
+  path: string;
+  size_bytes: number;
+  line_count?: number | null;
+  tags: string[];
+}
+
+export interface IntruderSuggestions {
+  urls: { method: string; url: string; path: string }[];
+  header_names: string[];
+  query_params: string[];
+  body_fields: string[];
+  endpoints: { method: string; host: string; path_pattern: string; category?: string }[];
+  hosts: string[];
+}
+
+export interface IntruderResultFilters {
+  anomaliesOnly: boolean;
+  reflectedOnly: boolean;
+  minSize: number | null;
+  maxSize: number | null;
+  minTimeMs: number | null;
+  maxTimeMs: number | null;
+  statusCodes: number[];   // empty = all
+  payloadSearch: string;
+}
 
 export interface FindingRecord {
   finding_id: string;
@@ -558,6 +657,7 @@ export type MatchOperator =
   | 'contains' 
   | 'not_contains' 
   | 'regex' 
+  | 'not_regex'
   | 'gt' 
   | 'lt' 
   | 'exists' 
@@ -694,5 +794,126 @@ export interface ProposalStats {
   completed: number;
   dismissed: number;
 }
+
+// ============================================================================
+// Nuclei Templates Engine Models
+// ============================================================================
+
+export type NucleiSeverity = 'info' | 'low' | 'medium' | 'high' | 'critical' | 'unknown';
+
+export interface NucleiMatcher {
+  type: 'word' | 'regex' | 'status' | 'binary' | 'dsl' | string;
+  condition?: 'and' | 'or';
+  part?: 'body' | 'header' | 'status' | 'all' | string;
+  words?: string[];
+  regex?: string[];
+  status?: number[];
+  negative?: boolean;
+  match_all?: boolean;
+  internal?: boolean;
+}
+
+export interface NucleiInfo {
+  name: string;
+  author?: string | string[];
+  severity: NucleiSeverity | string;
+  description?: string;
+  tags?: string[] | string;
+  reference?: string[] | string;
+  metadata?: Record<string, unknown>;
+  remediation?: string;
+  classification?: Record<string, unknown>;
+}
+
+export interface NucleiHttpBlock {
+  method?: string;
+  path?: string[];
+  headers?: Record<string, string>;
+  body?: string;
+  matchers?: NucleiMatcher[];
+  matchers_condition?: 'and' | 'or';
+  extractors?: any[];
+  raw?: string[];
+}
+
+export interface NucleiTemplate {
+  id: string;
+  info: NucleiInfo;
+  http?: NucleiHttpBlock[];
+  requests?: NucleiHttpBlock[];
+  file_path?: string;
+  category?: string;
+  is_passive?: boolean;
+  tags?: string[];
+}
+
+export interface NucleiStats {
+  total_templates: number;
+  categories: Record<string, number>;
+  severities: Record<string, number>;
+  tags: Record<string, number>;
+  passive_templates_count?: number;
+  active_templates_count?: number;
+}
+
+// ============================================================================
+// Tools & Decoders API Models
+// ============================================================================
+
+export interface AutoDecodeResult {
+  status: string;
+  detected_type: string;
+  result: string;
+  is_binary?: boolean;
+  layers?: Array<{ layer: number; type: string; result: string }>;
+  jwt_claims?: any;
+  error?: string;
+}
+
+export interface EncodeResponse {
+  status: string;
+  result: string;
+}
+
+export interface HexdumpResponse {
+  status: string;
+  dump: string;
+  hex_dump?: string;
+}
+
+export interface FlowReplayRequest {
+  override_method?: string;
+  override_url?: string;
+  override_headers?: Record<string, string>;
+  override_body?: string | null;
+}
+
+export interface FlowReplayResponse {
+  ok: boolean;
+  replayed_flow_id: string;
+  status_code: number;
+  reason?: string;
+  headers: Record<string, string>;
+  duration_ms: number;
+  body: string;
+  content_length: number;
+}
+
+export interface TelemetryLogEntry {
+  id: string;
+  timestamp: string;
+  type: 'AUTOPILOT' | 'BATCH' | 'MANUAL' | 'SAFETY_BRAKE' | 'SYSTEM' | 'ERROR';
+  message: string;
+  method?: string;
+  endpointPath?: string;
+  proposalId?: string;
+  statusCode?: number;
+  statusDelta?: string;
+  lengthDeltaBytes?: number;
+  latencyMs?: number;
+  verdictLevel?: string;
+  verdictDescription?: string;
+}
+
 
 

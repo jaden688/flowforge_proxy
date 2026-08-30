@@ -20,7 +20,9 @@ import {
   Table,
   FileText,
   Clock,
-  ArrowRight
+  ArrowRight,
+  RotateCcw,
+  RefreshCw
 } from 'lucide-react';
 import { InspectorSubView } from '../../types';
 import { HexDumpRenderer } from '../inspector/renderers/HexDumpRenderer';
@@ -104,6 +106,28 @@ export const SplitInspector: React.FC = () => {
     setIsDecoderOpen(true);
   };
 
+  const [isReplaying, setIsReplaying] = useState(false);
+  const [replayFeedback, setReplayFeedback] = useState<string | null>(null);
+
+  const handleReplayFlow = async () => {
+    if (!flow || isReplaying) return;
+    setIsReplaying(true);
+    setReplayFeedback('Replaying...');
+    try {
+      const res = await api.replayFlow(flow.id);
+      if (res.ok) {
+        setReplayFeedback(`Replayed (${res.status_code})`);
+      } else {
+        setReplayFeedback('Replay Failed');
+      }
+    } catch (err: any) {
+      setReplayFeedback(`Error: ${err?.message || 'Failed'}`);
+    } finally {
+      setIsReplaying(false);
+      setTimeout(() => setReplayFeedback(null), 3000);
+    }
+  };
+
   const reflections = flow.triage?.reflections || [];
   const reflectedWords = reflections.map((r) => r.value).filter(Boolean);
 
@@ -129,6 +153,25 @@ export const SplitInspector: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-2 flex-shrink-0">
+          {/* 1-Click Replay Action */}
+          <button
+            onClick={handleReplayFlow}
+            disabled={isReplaying}
+            className={`px-2.5 py-1 rounded border text-xs font-mono flex items-center gap-1.5 transition-colors ${
+              replayFeedback
+                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                : 'bg-slate-800 hover:bg-slate-700 text-emerald-300 border-slate-700 hover:border-emerald-500/40'
+            }`}
+            title="Replay this intercepted flow against the target"
+          >
+            {isReplaying ? (
+              <RefreshCw className="w-3 h-3 animate-spin text-emerald-400" />
+            ) : (
+              <RotateCcw className="w-3 h-3 text-emerald-400" />
+            )}
+            <span>{replayFeedback || 'Replay'}</span>
+          </button>
+
           {/* Quick Decoder Action */}
           <button
             onClick={() => handleOpenDecoder()}
@@ -189,7 +232,7 @@ export const SplitInspector: React.FC = () => {
             )}
             {tab === 'telemetry' && (
               <span className="text-[10px] text-slate-400">
-                {flow.duration_ms || flow.latency_ms || 45}ms
+                {(flow.duration_ms ?? flow.latency_ms ?? 0)}ms
               </span>
             )}
           </button>
@@ -358,11 +401,11 @@ export const SplitInspector: React.FC = () => {
             <div className="flex flex-wrap items-center gap-3 p-2.5 bg-[#0A0E17] border border-border rounded-lg">
               <span className="text-slate-400">Status:</span>
               <span className="text-emerald-400 font-bold">
-                {flow.response_status || flow.response_status_code || 200} {flow.response_status_text || flow.response_reason || 'OK'}
+                {flow.response_status ?? flow.response_status_code ?? '---'} {flow.response_status_text || flow.response_reason || (flow.response_status === 200 ? 'OK' : '')}
               </span>
               <span className="text-slate-600">|</span>
               <span className="text-slate-400">Latency:</span>
-              <span className="text-slate-200">{flow.latency_ms || flow.duration_ms || 0}ms</span>
+              <span className="text-slate-200">{(flow.latency_ms ?? flow.duration_ms ?? 0)}ms</span>
               <span className="text-slate-600">|</span>
               <span className="text-slate-400">Size:</span>
               <span className="text-slate-200">{(flow as any).response_content_length ?? (flow as any).response?.content_length ?? flow.response_size ?? flow.response_body?.length ?? 0} bytes</span>
@@ -641,7 +684,7 @@ export const SplitInspector: React.FC = () => {
                 Raw Response Stream
               </h4>
               <pre className="p-3 bg-[#0A0E17] border border-border rounded-lg font-mono text-xs text-slate-300 overflow-x-auto whitespace-pre">
-                {`HTTP/1.1 ${flow.response_status || 200} ${flow.response_status_text || 'OK'}\n` +
+                {`HTTP/1.1 ${flow.response_status ?? 200} ${flow.response_status_text || (flow.response_status === 200 ? 'OK' : '')}\n` +
                   Object.entries(flow.response_headers || {})
                     .map(([k, v]) => `${k}: ${v}`)
                     .join('\n') +

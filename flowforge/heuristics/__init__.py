@@ -37,6 +37,17 @@ from flowforge.heuristics.rule_engine import (
     get_rule_engine,
 )
 from flowforge.heuristics.schema_inferrer import SchemaInferrer
+from flowforge.heuristics.nuclei_loader import (
+    NucleiTemplateLoader,
+    get_nuclei_loader,
+    reset_nuclei_loader,
+)
+from flowforge.heuristics.nuclei_matcher import (
+    NucleiMatcher,
+    NucleiMatcherEngine,
+    get_nuclei_matcher,
+    reset_nuclei_matcher,
+)
 
 __all__ = [
     "ParameterLocation",
@@ -69,4 +80,11 @@ __all__ = [
     "default_rule_engine",
     "FlowInspectionContext",
     "calculate_shannon_entropy",
+    "NucleiTemplateLoader",
+    "get_nuclei_loader",
+    "reset_nuclei_loader",
+    "NucleiMatcher",
+    "NucleiMatcherEngine",
+    "get_nuclei_matcher",
+    "reset_nuclei_matcher",
 ]

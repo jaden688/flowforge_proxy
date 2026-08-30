@@ -97,8 +97,10 @@ export const TargetDossier: React.FC = () => {
 
         // Add path parameters
         if (pathTemplate.includes('{id}')) {
-          const exists = synthesized[key].parameters.find((p) => p.name === 'id' && p.location === 'path');
-          if (!exists) {
+          const pathMatches = (f.path.match(/\/\d+(?=\/|$)/g) || []).map((m) => m.slice(1));
+          const extractedValues = pathMatches.length > 0 ? Array.from(new Set(pathMatches)) : [];
+          const existingParam = synthesized[key].parameters.find((p) => p.name === 'id' && p.location === 'path');
+          if (!existingParam) {
             synthesized[key].parameters.push({
               name: 'id',
               location: 'path',
@@ -107,9 +109,15 @@ export const TargetDossier: React.FC = () => {
               idor_risk: 'HIGH',
               required: true,
               nullable: false,
-              sample_values: ['1001', '1002'],
+              sample_values: extractedValues,
               reflections_count: 0,
               last_seen: f.timestamp,
+            });
+          } else {
+            extractedValues.forEach((val) => {
+              if (!existingParam.sample_values.includes(val)) {
+                existingParam.sample_values.push(val);
+              }
             });
           }
         }

@@ -30,6 +30,10 @@ class EventType(str, Enum):
     PROPOSAL_DISMISSED = "proposal_dismissed"
     PROPOSAL_STATS = "proposal_stats"
 
+    # Active Intruder Events
+    INTRUDER_RESULT = "intruder_result"
+    INTRUDER_STATUS = "intruder_status"
+
 
 class FlowEvent(BaseModel):
     """Standardized event packet broadcast to WebSocket and SSE clients."""

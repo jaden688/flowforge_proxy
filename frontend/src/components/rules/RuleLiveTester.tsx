@@ -201,13 +201,13 @@ export const RuleLiveTester: React.FC<RuleLiveTesterProps> = ({ rule }) => {
   // Test Sandbox Flow Data state
   const [selectedFlowSelect, setSelectedFlowSelect] = useState<string>(selectedFlowId || flowOrder[0] || 'custom');
   const [method, setMethod] = useState<HttpMethod>('GET');
-  const [url, setUrl] = useState<string>('https://api.target.com/api/v1/admin/users?id=1001');
+  const [url, setUrl] = useState<string>('');
   const [statusCode, setStatusCode] = useState<number>(200);
-  const [requestHeadersJson, setRequestHeadersJson] = useState<string>('{\n  "Authorization": "Bearer eyJhbGciOi...",\n  "X-Role": "admin"\n}');
-  const [responseHeadersJson, setResponseHeadersJson] = useState<string>('{\n  "Content-Type": "application/json"\n}');
-  const [requestBody, setRequestBody] = useState<string>('{"role": "superuser"}');
-  const [responseBody, setResponseBody] = useState<string>('{"status": "success", "user": {"id": 1001, "role": "admin"}}');
-  const [latencyMs, setLatencyMs] = useState<number>(42);
+  const [requestHeadersJson, setRequestHeadersJson] = useState<string>('{}');
+  const [responseHeadersJson, setResponseHeadersJson] = useState<string>('{}');
+  const [requestBody, setRequestBody] = useState<string>('');
+  const [responseBody, setResponseBody] = useState<string>('');
+  const [latencyMs, setLatencyMs] = useState<number>(0);
 
   // Load flow into sandbox when selected from dropdown
   useEffect(() => {
@@ -221,7 +221,7 @@ export const RuleLiveTester: React.FC<RuleLiveTesterProps> = ({ rule }) => {
         setResponseHeadersJson(JSON.stringify(f.response_headers || {}, null, 2));
         setRequestBody(f.request_body || '');
         setResponseBody(f.response_body || '');
-        setLatencyMs(f.latency_ms ?? f.duration_ms ?? (f as any).timing_ms ?? 35);
+        setLatencyMs(f.latency_ms ?? f.duration_ms ?? (f as any).timing_ms ?? 0);
       }
     }
   }, [selectedFlowSelect, flows]);
@@ -292,21 +292,21 @@ export const RuleLiveTester: React.FC<RuleLiveTesterProps> = ({ rule }) => {
   const loadPresetVulnerable = () => {
     setSelectedFlowSelect('custom');
     setMethod('GET');
-    setUrl('https://api.target.com/api/v1/admin/dashboard');
+    setUrl('/api/v1/admin/dashboard');
     setStatusCode(200);
-    setRequestHeadersJson('{\n  "Host": "api.target.com"\n}');
+    setRequestHeadersJson('{\n  "Host": "example.com"\n}');
     setResponseHeadersJson('{\n  "Content-Type": "application/json"\n}');
     setRequestBody('');
-    setResponseBody('{"admin": true, "secret_key": "eyJhbGciOi..."}');
+    setResponseBody('{"admin": true}');
     setLatencyMs(45);
   };
 
   const loadPresetBenign = () => {
     setSelectedFlowSelect('custom');
     setMethod('GET');
-    setUrl('https://api.target.com/static/images/logo.png');
+    setUrl('/static/images/logo.png');
     setStatusCode(200);
-    setRequestHeadersJson('{\n  "Host": "api.target.com"\n}');
+    setRequestHeadersJson('{\n  "Host": "example.com"\n}');
     setResponseHeadersJson('{\n  "Content-Type": "image/png"\n}');
     setRequestBody('');
     setResponseBody('');
@@ -352,16 +352,18 @@ export const RuleLiveTester: React.FC<RuleLiveTesterProps> = ({ rule }) => {
           <button
             type="button"
             onClick={loadPresetVulnerable}
+            title="Load example request for testing (demo data)"
             className="px-2.5 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-500/40 text-xs font-semibold"
           >
-            Vulnerable Preset
+            Demo: Vulnerable
           </button>
           <button
             type="button"
             onClick={loadPresetBenign}
+            title="Load benign example request for comparison (demo data)"
             className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-semibold"
           >
-            Benign Preset
+            Demo: Benign
           </button>
         </div>
       </div>

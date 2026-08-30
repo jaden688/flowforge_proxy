@@ -71,7 +71,7 @@ export const DiffViewer: React.FC = () => {
                 const f = flows[id];
                 return (
                   <option key={id} value={id}>
-                    {f ? `[#${f.method} ${f.response_status || 200}] ${f.path}` : id}
+                    {f ? `[#${f.method} ${f.response_status ?? '---'}] ${f.path}` : id}
                   </option>
                 );
               })}
@@ -100,7 +100,7 @@ export const DiffViewer: React.FC = () => {
                 const f = flows[id];
                 return (
                   <option key={id} value={id}>
-                    {f ? `[#${f.method} ${f.response_status || 200}] ${f.path}` : id}
+                    {f ? `[#${f.method} ${f.response_status ?? '---'}] ${f.path}` : id}
                   </option>
                 );
               })}

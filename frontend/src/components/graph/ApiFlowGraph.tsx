@@ -65,13 +65,13 @@ export const ApiFlowGraph: React.FC = () => {
   // --------------------------------------------------------------------------
   // Build Graph Nodes & Directed Lineage Edges from Intercepted Flows & Dossiers
   // --------------------------------------------------------------------------
-  const { nodes, edges, hostList } = useMemo(() => {
+  const { nodes, edges, hostList, hasData } = useMemo(() => {
     const rawNodesMap: Record<string, GraphNodeData> = {};
     const hostsSet = new Set<string>();
 
     // 1. Process discovered dossiers
     Object.values(dossiers).forEach((dossier) => {
-      const host = dossier.host || 'api.target.com';
+      const host = dossier.host || 'unknown-host';
       hostsSet.add(host);
       const path = dossier.path_template || '/';
       const nodeId = `node-${host}-${path}`;
@@ -127,7 +127,15 @@ export const ApiFlowGraph: React.FC = () => {
     // 2. Process intercepted flows to enrich or add nodes
     const flowList = flowOrder.map((id) => flows[id]).filter(Boolean);
     flowList.forEach((flow) => {
-      const host = flow.host || 'api.target.com';
+      let host = flow.host;
+      if (!host && flow.url) {
+        try {
+          if (flow.url.startsWith('http')) {
+            host = new URL(flow.url).host;
+          }
+        } catch (_) {}
+      }
+      host = host || 'unknown-host';
       hostsSet.add(host);
       const path = flow.path.split('?')[0] || '/';
       const nodeId = `node-${host}-${path}`;
@@ -186,93 +194,9 @@ export const ApiFlowGraph: React.FC = () => {
       }
     });
 
-    // Fallback: If no flows or dossiers captured yet, provide sample realistic target topology
+    // If no flows or dossiers captured yet, show empty state
     if (Object.keys(rawNodesMap).length === 0) {
-      const defaultHost = 'api.forge-target.io';
-      hostsSet.add(defaultHost);
-      const sampleNodes: GraphNodeData[] = [
-        {
-          id: `node-${defaultHost}-/api/v1/auth/login`,
-          label: 'POST /api/v1/auth/login',
-          host: defaultHost,
-          path: '/api/v1/auth/login',
-          method: 'POST',
-          category: 'AUTH',
-          riskScore: 35,
-          anomalies: ['Auth Handshake'],
-          reflectionsCount: 0,
-          idorRisk: 'NONE',
-          authPresent: true,
-          dossierKey: `${defaultHost}::/api/v1/auth/login`,
-          callCount: 6,
-          lastStatusCode: 200,
-        },
-        {
-          id: `node-${defaultHost}-/api/v1/users/{id}`,
-          label: 'GET /api/v1/users/{id}',
-          host: defaultHost,
-          path: '/api/v1/users/{id}',
-          method: 'GET',
-          category: 'DATA_READ',
-          riskScore: 85,
-          anomalies: ['High-Risk IDOR', 'Input Reflection'],
-          reflectionsCount: 2,
-          idorRisk: 'HIGH',
-          authPresent: true,
-          dossierKey: `${defaultHost}::/api/v1/users/{id}`,
-          callCount: 14,
-          lastStatusCode: 200,
-        },
-        {
-          id: `node-${defaultHost}-/api/v1/orders`,
-          label: 'GET /api/v1/orders',
-          host: defaultHost,
-          path: '/api/v1/orders',
-          method: 'GET',
-          category: 'DATA_READ',
-          riskScore: 45,
-          anomalies: ['Numeric Identifier'],
-          reflectionsCount: 0,
-          idorRisk: 'LOW',
-          authPresent: true,
-          dossierKey: `${defaultHost}::/api/v1/orders`,
-          callCount: 8,
-          lastStatusCode: 200,
-        },
-        {
-          id: `node-${defaultHost}-/api/v1/orders/checkout`,
-          label: 'POST /api/v1/orders/checkout',
-          host: defaultHost,
-          path: '/api/v1/orders/checkout',
-          method: 'POST',
-          category: 'MUTATION_ACTION',
-          riskScore: 70,
-          anomalies: ['State Mutation', 'Token Reflection'],
-          reflectionsCount: 1,
-          idorRisk: 'LOW',
-          authPresent: true,
-          dossierKey: `${defaultHost}::/api/v1/orders/checkout`,
-          callCount: 4,
-          lastStatusCode: 201,
-        },
-        {
-          id: `node-${defaultHost}-/api/v1/admin/tenants`,
-          label: 'GET /api/v1/admin/tenants',
-          host: defaultHost,
-          path: '/api/v1/admin/tenants',
-          method: 'GET',
-          category: 'ADMIN',
-          riskScore: 95,
-          anomalies: ['Admin Surface', 'Auth Deviation'],
-          reflectionsCount: 0,
-          idorRisk: 'HIGH',
-          authPresent: false,
-          dossierKey: `${defaultHost}::/api/v1/admin/tenants`,
-          callCount: 2,
-          lastStatusCode: 403,
-        },
-      ];
-      sampleNodes.forEach((n) => (rawNodesMap[n.id] = n));
+      return { nodes: [], edges: [], hostList: [], hasData: false };
     }
 
     // 3. Compute DAG Layer Positions (Layered Columns: Auth -> Data Read -> Mutation -> Admin)
@@ -376,6 +300,7 @@ export const ApiFlowGraph: React.FC = () => {
       nodes: positionedNodes,
       edges: computedEdges,
       hostList: Array.from(hostsSet),
+      hasData: true,
     };
   }, [flows, flowOrder, dossiers, customNodePositions]);
 
@@ -724,6 +649,21 @@ export const ApiFlowGraph: React.FC = () => {
             <RotateCcw className="w-4 h-4" />
           </button>
         </div>
+
+        {/* Empty State — No Captured Traffic Yet */}
+        {!hasData && nodes.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="max-w-sm text-center space-y-2">
+              <div className="mx-auto w-12 h-12 rounded-full bg-slate-900 border border-dashed border-slate-700 flex items-center justify-center">
+                <Layers className="w-5 h-5 text-slate-500" />
+              </div>
+              <p className="text-sm font-bold text-slate-400">No captured traffic yet</p>
+              <p className="text-[10px] text-slate-500 leading-relaxed">
+                Endpoints will appear here as flows are captured through the proxy. Start browsing or replaying requests to build the topology graph.
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Node Inspector Detail Panel (Drawer when a node is clicked) */}
         {selectedNode && (

@@ -6,6 +6,8 @@ const suites = [
   { name: 'Strategy Recommendations Scoring & Ranking', path: 'frontend/tests/test_recommendations_scoring.ts' },
   { name: 'Hex Dump & Multi-View Inspector Stress', path: 'frontend/tests/test_hex_dump_multiview.ts' },
   { name: 'Auto-Find Proposal Pipeline & Operator Approval Workflow', path: 'frontend/tests/test_proposal_pipeline.ts' },
+  { name: 'Decoder & Real-Data Hardening (M3)', path: 'frontend/tests/test_m3_decoder_real_data_hardening.ts' },
+  { name: '1-Click Replay & Frontend API Client Adversarial Suite', path: 'frontend/tests/test_challenger2_m1_replay_empirical.ts' },
 ];
 
 console.log("================================================================================");

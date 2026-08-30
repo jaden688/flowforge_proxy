@@ -299,6 +299,7 @@ async def generate_proposals_for_flow(
         db_writer = getattr(request.app.state, "db_writer", None) if request else None
         if db_writer:
             await db_writer.enqueue_proposals_batch(proposals)
+            await db_writer.flush()
         else:
             for p in proposals:
                 await repo.update_proposal_state(p.id, p.state)
@@ -352,6 +353,14 @@ async def execute_proposal(
     query_params = dict(req.query_params)
     body = req.body
 
+    # Ensure URL reflects scheme and server host if URL is relative
+    if url.startswith("/"):
+        scheme = baseline_flow.scheme or "http"
+        host = baseline_flow.server_host
+        port = baseline_flow.server_port
+        port_str = f":{port}" if (port and port not in (80, 443)) else ""
+        url = f"{scheme}://{host}{port_str}{url}"
+
     # Apply parameter mutation based on location
     if proposal.target_param_location == "query" and proposal.target_param_name:
         query_params[proposal.target_param_name] = proposal.mutated_value
@@ -387,6 +396,18 @@ async def execute_proposal(
         headers["Authorization"] = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJleHBpcmVkIiwiaWF0IjoxNTAwMDAwMDAwLCJleHAiOjE1MDAwMDAwMDB9.invalidsig"
     elif proposal.auth_override == "ALG_NONE":
         headers["Authorization"] = "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiIsImlzX2FkbWluIjp0cnVlfQ."
+
+    # Clean query string from url when passing params=query_params to eliminate duplicate query parameters
+    parsed_u = urllib.parse.urlsplit(url)
+    if not query_params and parsed_u.query:
+        query_params = dict(urllib.parse.parse_qsl(parsed_u.query))
+    url = urllib.parse.urlunsplit((parsed_u.scheme, parsed_u.netloc, parsed_u.path, "", ""))
+
+    # Strip hop-by-hop headers
+    headers.pop("host", None)
+    headers.pop("Host", None)
+    headers.pop("content-length", None)
+    headers.pop("Content-Length", None)
 
     # Replay execution
     start_time = time.perf_counter()
@@ -526,6 +547,7 @@ async def execute_proposal(
     db_writer = getattr(request.app.state, "db_writer", None) if request else None
     if db_writer:
         await db_writer.enqueue_insert_flow(executed_flow)
+        await db_writer.flush()
 
     broadcaster.broadcast_proposal_executed(
         proposal.flow_id,
@@ -676,4 +698,181 @@ async def transfer_proposal_to_matrix(
         "case_id": case.id,
         "proposal_id": proposal.id,
         "name": custom_name,
+    }
+
+
+@router.post("/{proposal_id}/to-intruder")
+async def transfer_proposal_to_intruder(
+    proposal_id: str,
+    request: Request,
+    concurrency: int = 4,
+    rate_limit: Optional[float] = None,
+    repo: FlowRepository = Depends(get_repository),
+    broadcaster: EventBroadcaster = Depends(get_broadcaster_dep),
+):
+    """
+    Convert a proposal into an Intruder job config and launch the campaign.
+    Automatically builds injection points, payload wordlists, and auth
+    overrides from the proposal's anomaly type.
+    """
+    proposal = await repo.get_proposal_by_id(proposal_id)
+    if not proposal:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Proposal with ID '{proposal_id}' not found.",
+        )
+
+    baseline_flow = await repo.get_flow_by_id(proposal.flow_id)
+    flow_dict = None
+    if baseline_flow:
+        req_url = baseline_flow.request.url
+        if req_url.startswith("/"):
+            scheme = baseline_flow.scheme or "http"
+            host = baseline_flow.server_host
+            port = baseline_flow.server_port
+            port_str = f":{port}" if (port and port not in (80, 443)) else ""
+            req_url = f"{scheme}://{host}{port_str}{req_url}"
+        flow_dict = {
+            "id": baseline_flow.id,
+            "url": req_url,
+            "method": baseline_flow.request.method,
+            "headers": dict(baseline_flow.request.headers),
+            "body": baseline_flow.request.body,
+            "path": baseline_flow.request.path,
+        }
+
+    from flowforge.core.bridge import build_intruder_config
+    config = build_intruder_config(
+        proposal,
+        flow_dict,
+        concurrency=concurrency,
+        rate_limit_rps=rate_limit,
+    )
+
+    # Launch via the intruder engine singleton
+    from flowforge.core.intruder import IntruderEngine
+    engine = IntruderEngine()
+    job = await engine.start_job(config)
+
+    # Update proposal state
+    proposal.state = ProposalState.EXECUTING
+    proposal.updated_at = time.time()
+    await repo.update_proposal_state(proposal_id, ProposalState.EXECUTING)
+
+    broadcaster.broadcast_proposal_updated(
+        proposal.flow_id,
+        proposal_id,
+        {"state": ProposalState.EXECUTING.value, "intruder_job_id": job.id},
+    )
+
+    return {
+        "ok": True,
+        "proposal_id": proposal.id,
+        "intruder_job_id": job.id,
+        "payload_count": job.payload_count,
+        "total_requests": job.total_requests,
+        "injection_points": [ip.model_dump() for ip in config.injection_points],
+        "wordlist_categories": config.arsenal_wordlist_ids,
+        "inline_payload_count": len(config.inline_payloads),
+        "concurrency": config.concurrency,
+    }
+
+
+@router.post("/sweep")
+async def sweep_proposals_to_intruder(
+    request: Request,
+    min_confidence: float = Query(60.0, ge=0, le=100),
+    max_proposals: int = Query(20, ge=1, le=100),
+    concurrency: int = Query(4, ge=1, le=64),
+    rate_limit: Optional[float] = Query(None, gt=0),
+    severity_filter: Optional[str] = Query(None, description="Comma-separated severities: CRITICAL,HIGH,MEDIUM,LOW"),
+    repo: FlowRepository = Depends(get_repository),
+    broadcaster: EventBroadcaster = Depends(get_broadcaster_dep),
+):
+    """
+    Batch-sweep: pick all high-confidence pending proposals, convert them to
+    intruder jobs, and launch all campaigns. Returns a summary of what was launched.
+    """
+    severity_list = None
+    if severity_filter:
+        severity_list = [s.strip().upper() for s in severity_filter.split(",")]
+
+    # Fetch all pending proposals
+    all_items, _ = await repo.list_proposals(
+        state=ProposalState.PENDING.value,
+        min_confidence=min_confidence,
+        page=1,
+        page_size=max_proposals * 2,
+    )
+
+    # Filter by severity if requested
+    if severity_list:
+        all_items = [p for p in all_items if p.severity.value in severity_list]
+
+    eligible = all_items[:max_proposals]
+    if not eligible:
+        return {"ok": True, "jobs_launched": 0, "message": "No eligible proposals found."}
+
+    # Fetch flows for reconstruction
+    flow_ids = list({p.flow_id for p in eligible})
+    flows_map: Dict[str, Dict[str, Any]] = {}
+    for fid in flow_ids:
+        fr = await repo.get_flow_by_id(fid)
+        if fr:
+            req_url = fr.request.url
+            if req_url.startswith("/"):
+                scheme = fr.scheme or "http"
+                host = fr.server_host
+                port = fr.server_port
+                port_str = f":{port}" if (port and port not in (80, 443)) else ""
+                req_url = f"{scheme}://{host}{port_str}{req_url}"
+            flows_map[fid] = {
+                "id": fr.id,
+                "url": req_url,
+                "method": fr.request.method,
+                "headers": dict(fr.request.headers),
+                "body": fr.request.body,
+                "path": fr.request.path,
+            }
+
+    from flowforge.core.bridge import build_intruder_config
+    from flowforge.core.intruder import IntruderEngine
+    engine = IntruderEngine()
+
+    launched = []
+    for proposal in eligible:
+        try:
+            flow_dict = flows_map.get(proposal.flow_id)
+            config = build_intruder_config(
+                proposal, flow_dict,
+                concurrency=concurrency,
+                rate_limit_rps=rate_limit,
+            )
+            job = await engine.start_job(config)
+            proposal.state = ProposalState.EXECUTING
+            proposal.updated_at = time.time()
+            await repo.update_proposal_state(proposal.id, ProposalState.EXECUTING)
+            launched.append({
+                "proposal_id": proposal.id,
+                "intruder_job_id": job.id,
+                "anomaly_type": proposal.anomaly_type.value if hasattr(proposal.anomaly_type, "value") else str(proposal.anomaly_type),
+                "total_requests": job.total_requests,
+            })
+        except Exception as e:
+            launched.append({
+                "proposal_id": proposal.id,
+                "error": str(e),
+            })
+
+    broadcaster.broadcast_proposal_updated(
+        "all",
+        "sweep_batch",
+        {"launched": len(launched), "min_confidence": min_confidence},
+    )
+
+    return {
+        "ok": True,
+        "jobs_launched": len(launched),
+        "total_proposals_swept": len(eligible),
+        "launched": launched,
     }

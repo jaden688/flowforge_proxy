@@ -11,6 +11,7 @@ import copy
 import json
 import logging
 import time
+import urllib.parse
 import uuid
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Request
@@ -22,6 +23,7 @@ from flowforge.models.curation import (
     RecommendStrategiesRequest,
     StrategyRecommendation,
 )
+from flowforge.models.flow import FlowRecord, RequestModel, ResponseModel
 from flowforge.wordlists import WordlistCategory, get_wordlist_loader, reset_wordlist_loader
 
 router = APIRouter(prefix="/api/v1/matrix", tags=["Test Matrix"])
@@ -556,93 +558,264 @@ async def execute_test_matrix(payload: ExecuteMatrixRequest, background_tasks: B
         completed = 0
         anomalies = 0
         import httpx
-        
-        # Determine base URL
-        base_url = payload.target_url or "http://127.0.0.1:8000"
-        
+
+        # Per-case baseline flow cache for multi-endpoint matrix jobs
+        flow_cache: Dict[str, Optional[Any]] = {}
+
         for idx, case in enumerate(job_data["cases"]):
             case["status"] = "RUNNING"
             start_t = time.perf_counter()
-            
-            # Simulate real execution or execute via HTTP if target reachable
+
             status_code = 200
             length_delta = 0
             reflected = False
             anomaly_flag = None
-            
+            resp_body_text = ""
+            resp_headers: Dict[str, str] = {}
+            baseline_len = 0
+
+            # 1. Resolve baseline flow for this case
+            case_flow_id = case.get("baseline_flow_id")
+            case_baseline_flow = None
+            if case_flow_id:
+                if case_flow_id not in flow_cache:
+                    if hasattr(request.app.state, "repo"):
+                        try:
+                            flow_cache[case_flow_id] = await request.app.state.repo.get_flow_by_id(case_flow_id)
+                        except Exception:
+                            flow_cache[case_flow_id] = None
+                    else:
+                        flow_cache[case_flow_id] = None
+                case_baseline_flow = flow_cache.get(case_flow_id)
+
+            # 2. Determine target URL, headers, query params, and body
+            method = case.get("method", "GET")
+            headers: dict = {}
+            query_params: dict = {}
+            body: str | None = None
+
+            if payload.target_url:
+                base = payload.target_url.rstrip("/")
+                endpoint_path = case.get("endpoint_path", "/")
+                if not endpoint_path.startswith("/"):
+                    endpoint_path = "/" + endpoint_path
+                url = base + endpoint_path
+                if case_baseline_flow and case_baseline_flow.request:
+                    req = case_baseline_flow.request
+                    headers = dict(req.headers) if req.headers else {}
+                    query_params = dict(req.query_params) if req.query_params else {}
+                    body = req.body
+                    baseline_len = len(req.body or "")
+            elif case_baseline_flow and case_baseline_flow.request:
+                req = case_baseline_flow.request
+                raw_url = req.url
+                if raw_url.startswith("/"):
+                    scheme = case_baseline_flow.scheme or "http"
+                    host = case_baseline_flow.server_host
+                    port = case_baseline_flow.server_port
+                    port_str = f":{port}" if (port and port not in (80, 443)) else ""
+                    raw_url = f"{scheme}://{host}{port_str}{raw_url}"
+                parsed = urllib.parse.urlsplit(raw_url)
+                endpoint_path = case.get("endpoint_path", parsed.path)
+                if not endpoint_path.startswith("/"):
+                    endpoint_path = "/" + endpoint_path
+                # Strip query string from url to eliminate duplicate query parameters when params=query_params is passed
+                url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, endpoint_path, "", ""))
+                headers = dict(req.headers) if req.headers else {}
+                query_params = dict(req.query_params) if req.query_params else {}
+                if not query_params and parsed.query:
+                    query_params = dict(urllib.parse.parse_qsl(parsed.query))
+                body = req.body
+                baseline_len = len(req.body or "")
+            else:
+                status_code = 0
+                anomaly_flag = "MISSING_TARGET_URL: No target_url or baseline flow provided"
+                case["status"] = "FAILED"
+                latency_ms = int((time.perf_counter() - start_t) * 1000)
+                case["result_summary"] = {
+                    "status_code": status_code,
+                    "length_delta": 0,
+                    "latency_ms": latency_ms,
+                    "reflected": False,
+                    "anomaly_flag": anomaly_flag,
+                }
+                case["executed_flow_id"] = str(uuid.uuid4())
+                completed += 1
+                anomalies += 1
+                job_data["completed_count"] = completed
+                job_data["anomalies_count"] = anomalies
+                if hasattr(request.app.state, "broadcaster"):
+                    try:
+                        await request.app.state.broadcaster.broadcast("matrix_progress", {
+                            "job_id": job_id,
+                            "completed": completed,
+                            "total": len(job_data["cases"]),
+                            "last_case_id": case.get("id"),
+                            "anomaly_detected": True,
+                            "anomaly_case_name": case.get("name"),
+                        })
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.02)
+                continue
+
             try:
-                # Simulated heuristic execution logic with realistic security response profiles
-                cat = case.get("category")
-                mutated_val = case.get("mutated_value")
-                
-                if cat == "IDOR_SEQUENTIAL":
-                    if mutated_val == 0:
-                        status_code = 400
-                    elif mutated_val == 999999999:
-                        status_code = 404
+                # Apply parameter mutation
+                loc = case.get("target_param_location", "")
+                pname = case.get("target_param_name", "")
+                mval = case.get("mutated_value")
+
+                if loc == "query" and pname:
+                    query_params[pname] = mval
+                elif loc == "path" and pname:
+                    bv = case.get("baseline_value")
+                    if bv and str(bv) in url:
+                        url = url.replace(str(bv), str(mval or ""), 1)
+                    elif mval is not None:
+                        url = f"{url.rstrip('/')}/{mval}"
+                elif loc in ("body", "body_json", "json_body"):
+                    if isinstance(mval, (dict, list)):
+                        body = json.dumps(mval)
+                    elif mval is not None:
+                        body = str(mval)
+                elif loc == "header" and pname:
+                    if mval is None:
+                        headers.pop(pname, None)
                     else:
-                        status_code = 200
-                        length_delta = 1240
-                        anomaly_flag = "POTENTIAL_IDOR_LEAK"
-                elif cat == "IDOR_ROLE_SWAP":
-                    status_code = 200
-                    length_delta = 450
-                    anomaly_flag = "HORIZONTAL_PRIVILEGE_LEAK"
-                elif cat == "AUTH_STRIPPING":
-                    if case.get("auth_override") == "DROP":
-                        status_code = 401
-                    elif case.get("auth_override") == "EXPIRED":
-                        status_code = 401
-                    else:
-                        status_code = 200
-                        anomaly_flag = "AUTH_BYPASS"
-                elif cat == "TYPE_CONFUSION":
-                    if isinstance(mutated_val, dict):
-                        status_code = 500
-                        anomaly_flag = "UNHANDLED_EXCEPTION_500"
-                    else:
-                        status_code = 422
-                elif cat == "BOUNDARY_OVERFLOW":
-                    if "<svg" in str(mutated_val):
-                        status_code = 200
+                        headers[pname] = str(mval)
+
+                # Apply auth overrides
+                auth_ov = case.get("auth_override")
+                if auth_ov == "DROP":
+                    for k in list(headers.keys()):
+                        if k.lower() in ("authorization", "cookie", "x-api-key", "apikey", "x-auth-token"):
+                            del headers[k]
+                elif auth_ov == "USER_B":
+                    headers["Authorization"] = "Bearer simulated-user-b-token-12345"
+                elif auth_ov == "EXPIRED":
+                    headers["Authorization"] = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJleHBpcmVkIiwiaWF0IjoxNTAwMDAwMDAwLCJleHAiOjE1MDAwMDAwMDB9.invalidsig"
+                elif auth_ov == "ALG_NONE":
+                    headers["Authorization"] = "Bearer eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZG1pbiIsImlzX2FkbWluIjp0cnVlfQ."
+
+                # Strip hop-by-hop headers
+                headers.pop("host", None)
+                headers.pop("Host", None)
+                headers.pop("content-length", None)
+                headers.pop("Content-Length", None)
+
+                # Execute real HTTP request
+                async with httpx.AsyncClient(verify=False, timeout=3.0, follow_redirects=True) as client:
+                    http_resp = await client.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        params=query_params if query_params else None,
+                        content=body.encode("utf-8") if isinstance(body, str) else body,
+                    )
+                    status_code = http_resp.status_code
+                    resp_headers = dict(http_resp.headers)
+                    resp_body_text = http_resp.text
+                    length_delta = len(resp_body_text) - baseline_len
+
+                    # Reflection check
+                    if mval and str(mval) in resp_body_text:
                         reflected = True
+
+                    # Anomaly detection
+                    cat = case.get("category", "")
+                    if cat == "IDOR_SEQUENTIAL" and status_code == 200 and length_delta > 100:
+                        anomaly_flag = "POTENTIAL_IDOR_LEAK"
+                    elif cat == "IDOR_ROLE_SWAP" and status_code == 200:
+                        anomaly_flag = "HORIZONTAL_PRIVILEGE_LEAK"
+                    elif cat == "AUTH_STRIPPING" and status_code == 200:
+                        anomaly_flag = "AUTH_BYPASS"
+                    elif cat == "TYPE_CONFUSION" and status_code >= 500:
+                        anomaly_flag = "UNHANDLED_EXCEPTION_500"
+                    elif reflected:
                         anomaly_flag = "PAYLOAD_REFLECTED"
-                    elif "../" in str(mutated_val):
-                        status_code = 400
-                    else:
-                        status_code = 200
-                elif cat == "MASS_ASSIGNMENT":
-                    status_code = 200
-                    anomaly_flag = "POTENTIAL_MASS_ASSIGNMENT"
-                else:
-                    status_code = 200
-                    
+                    elif cat == "MASS_ASSIGNMENT" and status_code == 200:
+                        anomaly_flag = "POTENTIAL_MASS_ASSIGNMENT"
+                    elif status_code >= 500:
+                        anomaly_flag = f"SERVER_ERROR_{status_code}"
+                    elif status_code not in (200, 301, 302, 304, 400, 401, 403, 404, 405):
+                        anomaly_flag = f"UNEXPECTED_STATUS_{status_code}"
+
             except Exception as ex:
-                status_code = 500
+                status_code = 0
                 anomaly_flag = f"EXECUTION_ERROR: {str(ex)}"
-                
-            latency_ms = int((time.perf_counter() - start_t) * 1000) + 15
+
+            latency_ms = int((time.perf_counter() - start_t) * 1000)
             is_anomaly = anomaly_flag is not None
             if is_anomaly:
                 anomalies += 1
                 case["status"] = "ANOMALY_DETECTED"
             else:
                 case["status"] = "PASSED"
-                
+
             case["result_summary"] = {
                 "status_code": status_code,
                 "length_delta": length_delta,
                 "latency_ms": latency_ms,
                 "reflected": reflected,
-                "anomaly_flag": anomaly_flag
+                "anomaly_flag": anomaly_flag,
             }
-            case["executed_flow_id"] = str(uuid.uuid4())
+            executed_flow_id = str(uuid.uuid4())
+            case["executed_flow_id"] = executed_flow_id
             completed += 1
-            
+
             job_data["completed_count"] = completed
             job_data["anomalies_count"] = anomalies
-            
-            # Broadcast progress if broadcaster available
+
+            # Construct and persist executed FlowRecord to db_writer
+            try:
+                parsed_exec_url = urllib.parse.urlsplit(url)
+                exec_scheme = parsed_exec_url.scheme or (case_baseline_flow.scheme if case_baseline_flow else "http") or "http"
+                exec_host = parsed_exec_url.hostname or (case_baseline_flow.server_host if case_baseline_flow else "127.0.0.1")
+                exec_port = parsed_exec_url.port or (case_baseline_flow.server_port if case_baseline_flow else (443 if exec_scheme == "https" else 80))
+
+                executed_flow = FlowRecord(
+                    id=executed_flow_id,
+                    timestamp_start=time.time() - (latency_ms / 1000.0),
+                    timestamp_end=time.time(),
+                    duration_ms=float(latency_ms),
+                    client_ip=case_baseline_flow.client_ip if case_baseline_flow else "127.0.0.1",
+                    client_port=case_baseline_flow.client_port if case_baseline_flow else None,
+                    server_host=exec_host,
+                    server_port=exec_port,
+                    scheme=exec_scheme,
+                    http_version=case_baseline_flow.http_version if case_baseline_flow else "HTTP/1.1",
+                    request=RequestModel(
+                        method=method,
+                        url=url,
+                        path=parsed_exec_url.path or case.get("endpoint_path", "/"),
+                        query_string=urllib.parse.urlencode(query_params) if query_params else "",
+                        query_params=query_params,
+                        headers=headers,
+                        content_type=headers.get("content-type") or headers.get("Content-Type"),
+                        content_length=len(body.encode("utf-8")) if isinstance(body, str) else (len(body) if body else 0),
+                        body=body,
+                        cookies=case_baseline_flow.request.cookies if (case_baseline_flow and case_baseline_flow.request) else {},
+                    ),
+                    response=ResponseModel(
+                        status_code=status_code if status_code > 0 else None,
+                        reason="OK" if status_code == 200 else ("Error" if status_code > 0 else "Execution Failed"),
+                        headers=resp_headers,
+                        content_type=resp_headers.get("content-type"),
+                        content_length=len(resp_body_text.encode("utf-8")) if resp_body_text else 0,
+                        body=resp_body_text,
+                        cookies={},
+                    ) if status_code > 0 else None,
+                    error_message=anomaly_flag if status_code == 0 else None,
+                    tags=["matrix_execution", case.get("category", "generic").lower()] + (["anomaly"] if is_anomaly else []),
+                    notes=f"Matrix execution of case '{case.get('id')}': {case.get('name')}",
+                )
+                db_writer = getattr(request.app.state, "db_writer", None)
+                if db_writer:
+                    await db_writer.enqueue_insert_flow(executed_flow)
+            except Exception as persist_err:
+                logger.warning("Failed to persist matrix executed FlowRecord: %s", persist_err)
+
+            # Broadcast progress
             if hasattr(request.app.state, "broadcaster"):
                 try:
                     await request.app.state.broadcaster.broadcast("matrix_progress", {
@@ -651,12 +824,12 @@ async def execute_test_matrix(payload: ExecuteMatrixRequest, background_tasks: B
                         "total": len(job_data["cases"]),
                         "last_case_id": case.get("id"),
                         "anomaly_detected": is_anomaly,
-                        "anomaly_case_name": case.get("name")
+                        "anomaly_case_name": case.get("name"),
                     })
                 except Exception:
                     pass
-            await asyncio.sleep(0.02) # Yield control
-            
+            await asyncio.sleep(0.02)
+
         job_data["is_running"] = False
 
     background_tasks.add_task(_runner)

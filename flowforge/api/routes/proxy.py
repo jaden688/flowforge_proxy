@@ -177,3 +177,22 @@ async def launch_browser(request: Request) -> Dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
+
+class ProxyReplayRequest(BaseModel):
+    method: str
+    url: str
+    headers: Optional[Dict[str, str]] = None
+    body: Optional[str] = None
+
+
+@router.post("/replay")
+async def proxy_replay(payload: ProxyReplayRequest) -> Dict[str, Any]:
+    """Alias for replaying an arbitrary request through the proxy / flow engine."""
+    from flowforge.api.routes.flows import send_custom_request, CustomSendRequest
+    return await send_custom_request(CustomSendRequest(
+        method=payload.method,
+        url=payload.url,
+        headers=payload.headers or {},
+        body=payload.body,
+    ))
+

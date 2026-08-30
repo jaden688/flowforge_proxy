@@ -30,6 +30,8 @@ class WebSocketClient {
         useFlowStore.getState().setWsStatus(true, 10);
         this.reconnectAttempts = 0;
         this.startHeartbeat();
+        // Sync rules from backend on connect
+        useFlowStore.getState().syncRulesFromBackend().catch(() => {});
       };
 
       this.ws.onclose = () => {
@@ -107,27 +109,35 @@ class WebSocketClient {
         if (payload) {
           const id = payload.proposal_id || payload.id || payload.proposal?.id;
           if (id) {
+            const statusCode = payload.status_code ?? payload.execution_result?.status_code ?? payload.executed_flow?.response_status ?? 0;
+            const lengthDelta = payload.length_delta_bytes ?? payload.length_delta ?? 0;
+            const latencyDelta = payload.latency_ms ?? payload.latency_delta_ms ?? 0;
+            const verdictLevel = payload.verdict_level || payload.execution_result?.verdict_level;
+            const verdictDesc = payload.verdict_description || payload.execution_result?.verdict_description;
+            const method = payload.method || payload.proposal?.method;
+            const endpointPath = payload.endpoint_path || payload.proposal?.endpoint_path;
+
             const updates: Partial<TestProposal> = {
               status: 'EXECUTED',
               state: 'EXECUTED',
               executed_flow_id: payload.executed_flow_id || payload.executed_flow?.id,
               diff_summary: {
-                status_code: payload.status_code || 200,
-                length_delta: payload.length_delta_bytes ?? payload.length_delta ?? 0,
-                latency_ms: payload.latency_ms ?? payload.latency_delta_ms ?? 0,
+                status_code: statusCode,
+                length_delta: lengthDelta,
+                latency_ms: latencyDelta,
                 reflected: !!payload.reflected,
-                anomaly_flag: payload.verdict_level || null,
+                anomaly_flag: verdictLevel || null,
                 status_delta: payload.status_delta,
-                verdict_level: payload.verdict_level,
-                verdict_description: payload.verdict_description,
+                verdict_level: verdictLevel,
+                verdict_description: verdictDesc,
               },
               execution_result: payload.execution_result || {
-                status_code: payload.status_code || 200,
+                status_code: statusCode,
                 status_delta: payload.status_delta,
-                length_delta_bytes: payload.length_delta_bytes,
-                latency_delta_ms: payload.latency_ms,
-                verdict_level: payload.verdict_level,
-                verdict_description: payload.verdict_description,
+                length_delta_bytes: lengthDelta,
+                latency_delta_ms: latencyDelta,
+                verdict_level: verdictLevel,
+                verdict_description: verdictDesc,
                 executed_flow_id: payload.executed_flow_id || payload.executed_flow?.id,
               },
             };
@@ -135,8 +145,28 @@ class WebSocketClient {
             if (payload.executed_flow) {
               store.addFlow(payload.executed_flow);
             }
+
+            store.addTelemetryLog({
+              id: `ws-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              timestamp: new Date().toLocaleTimeString(),
+              type: 'AUTOPILOT',
+              message: `Executed proposal ${id}`,
+              method,
+              endpointPath,
+              proposalId: id,
+              statusCode,
+              statusDelta: payload.status_delta,
+              lengthDeltaBytes: lengthDelta,
+              latencyMs: latencyDelta,
+              verdictLevel,
+              verdictDescription: verdictDesc,
+            });
           }
         }
+      } else if (msg.event === 'intruder_result') {
+        store.addIntruderResult(msg.data);
+      } else if (msg.event === 'intruder_status') {
+        store.updateIntruderJobProgress(msg.data);
       } else if (msg.event === 'proposal_dismissed') {
         const payload = msg.data;
         if (payload) {

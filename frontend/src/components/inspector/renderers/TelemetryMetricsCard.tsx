@@ -27,12 +27,12 @@ export const TelemetryMetricsCard: React.FC<TelemetryMetricsCardProps> = ({
   const telemetry = flow.telemetry || {};
 
   // Timing metrics (fallback to duration_ms or latency_ms if granular telemetry unavailable)
-  const totalDuration = telemetry.total_duration_ms || flow.duration_ms || flow.latency_ms || 45;
-  const dnsMs = telemetry.dns_ms ?? (flow.url.startsWith('https') ? 4 : 2);
-  const tcpMs = telemetry.tcp_connect_ms ?? 8;
-  const tlsMs = telemetry.tls_handshake_ms ?? (flow.url.startsWith('https') ? 14 : 0);
-  const ttfbMs = telemetry.ttfb_ms ?? Math.max(5, Math.floor(totalDuration * 0.6));
-  const downloadMs = telemetry.content_download_ms ?? Math.max(2, totalDuration - (dnsMs + tcpMs + tlsMs + ttfbMs));
+  const totalDuration = telemetry.total_duration_ms ?? flow.duration_ms ?? flow.latency_ms;
+  const dnsMs = telemetry.dns_ms;
+  const tcpMs = telemetry.tcp_connect_ms;
+  const tlsMs = telemetry.tls_handshake_ms;
+  const ttfbMs = telemetry.ttfb_ms;
+  const downloadMs = telemetry.content_download_ms;
 
   // Slices for waterfall visualization
   const timingSlices = [
@@ -43,22 +43,25 @@ export const TelemetryMetricsCard: React.FC<TelemetryMetricsCardProps> = ({
     { label: 'Download', ms: downloadMs, color: 'bg-emerald-500', text: 'text-emerald-400' },
   ];
 
-  const sumTiming = timingSlices.reduce((acc, s) => acc + s.ms, 0);
+  const sumTiming = timingSlices.reduce((acc, s) => acc + (s.ms ?? 0), 0);
 
   // Bandwidth & Size
-  const reqBytes = flow.request_size || (flow.request_body ? new TextEncoder().encode(flow.request_body).length : 0) + 240;
-  const respBytes = flow.response_size || (flow.response_body ? new TextEncoder().encode(flow.response_body).length : 0) + 320;
-  const totalBytes = reqBytes + respBytes;
-  const speedKbps = totalDuration > 0 ? ((totalBytes * 8) / (totalDuration / 1000) / 1024).toFixed(1) : '0';
+  const reqBytes = flow.request_size ?? (flow.request_body ? new TextEncoder().encode(flow.request_body).length : undefined);
+  const respBytes = flow.response_size ?? (flow.response_body ? new TextEncoder().encode(flow.response_body).length : undefined);
+  const totalBytes = (reqBytes ?? 0) + (respBytes ?? 0);
+  const hasBandwidth = reqBytes !== undefined || respBytes !== undefined;
+  const speedKbps = (totalDuration && totalDuration > 0 && hasBandwidth) 
+    ? ((totalBytes * 8) / (totalDuration / 1000) / 1024).toFixed(1) 
+    : undefined;
 
   // TLS & Protocol Details
-  const isHttps = flow.url.startsWith('https://');
-  const tlsVersion = telemetry.tls_version || (isHttps ? 'TLSv1.3' : 'Plaintext HTTP');
-  const cipherSuite = telemetry.cipher_suite || (isHttps ? 'TLS_AES_256_GCM_SHA384' : 'None');
-  const alpn = telemetry.alpn || 'h2';
-  const sni = telemetry.sni || flow.host;
-  const serverIp = telemetry.server_ip || '104.21.32.18';
-  const clientIp = flow.client_ip || '127.0.0.1';
+  const isHttps = flow.url.startsWith('https://') || (flow as any).scheme === 'https';
+  const tlsVersion = telemetry.tls_version || (isHttps ? undefined : 'Plaintext HTTP');
+  const cipherSuite = telemetry.cipher_suite;
+  const alpn = telemetry.alpn;
+  const sni = telemetry.sni || (isHttps ? flow.host : undefined);
+  const serverIp = telemetry.server_ip;
+  const clientIp = flow.client_ip || (telemetry as any).client_ip;
 
   return (
     <div className={`space-y-4 font-mono text-xs ${className}`}>
@@ -72,41 +75,51 @@ export const TelemetryMetricsCard: React.FC<TelemetryMetricsCardProps> = ({
             </h4>
           </div>
           <span className="text-primary font-bold text-sm">
-            {totalDuration} ms Total
+            {totalDuration !== undefined && totalDuration !== null ? `${totalDuration} ms Total` : 'Not Recorded'}
           </span>
         </div>
 
         {/* Stacked Waterfall Progress Bar */}
         <div className="h-3 w-full bg-slate-900 rounded-full overflow-hidden flex border border-slate-800 mb-3">
-          {timingSlices.map((slice, i) => {
-            const pct = Math.max(2, (slice.ms / sumTiming) * 100);
-            return (
-              <div
-                key={i}
-                style={{ width: `${pct}%` }}
-                className={`${slice.color} h-full transition-all`}
-                title={`${slice.label}: ${slice.ms}ms (${pct.toFixed(1)}%)`}
-              />
-            );
-          })}
+          {sumTiming > 0 ? (
+            timingSlices.map((slice, i) => {
+              if (slice.ms === undefined || slice.ms === null || slice.ms <= 0) return null;
+              const pct = (slice.ms / sumTiming) * 100;
+              return (
+                <div
+                  key={i}
+                  style={{ width: `${pct}%` }}
+                  className={`${slice.color} h-full transition-all`}
+                  title={`${slice.label}: ${slice.ms}ms (${pct.toFixed(1)}%)`}
+                />
+              );
+            })
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-[9px] text-slate-500">
+              No Timing Breakdown Recorded
+            </div>
+          )}
         </div>
 
         {/* Timing Milestones Grid */}
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 select-none">
-          {timingSlices.map((slice, i) => (
-            <div key={i} className="p-2 bg-slate-900/60 rounded border border-slate-800/80">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] text-slate-400">{slice.label}</span>
-                <span className={`w-2 h-2 rounded-full ${slice.color}`} />
+          {timingSlices.map((slice, i) => {
+            const hasValue = slice.ms !== undefined && slice.ms !== null;
+            return (
+              <div key={i} className="p-2 bg-slate-900/60 rounded border border-slate-800/80">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-slate-400">{slice.label}</span>
+                  <span className={`w-2 h-2 rounded-full ${hasValue ? slice.color : 'bg-slate-700'}`} />
+                </div>
+                <div className={`text-xs font-bold mt-1 ${hasValue ? slice.text : 'text-slate-500'}`}>
+                  {hasValue ? `${slice.ms} ms` : 'Not Recorded'}
+                </div>
+                <div className="text-[10px] text-slate-500">
+                  {hasValue && sumTiming > 0 ? `${((slice.ms! / sumTiming) * 100).toFixed(0)}% of total` : 'N/A'}
+                </div>
               </div>
-              <div className={`text-xs font-bold mt-1 ${slice.text}`}>
-                {slice.ms} ms
-              </div>
-              <div className="text-[10px] text-slate-500">
-                {((slice.ms / sumTiming) * 100).toFixed(0)}% of total
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -126,7 +139,9 @@ export const TelemetryMetricsCard: React.FC<TelemetryMetricsCardProps> = ({
                 <ArrowUp className="w-3.5 h-3.5 text-cyan-400" />
                 <span>Request Outbound</span>
               </div>
-              <span className="text-cyan-400 font-bold">{(reqBytes / 1024).toFixed(2)} KB ({reqBytes} B)</span>
+              <span className="text-cyan-400 font-bold">
+                {reqBytes !== undefined ? `${(reqBytes / 1024).toFixed(2)} KB (${reqBytes} B)` : 'Not Recorded'}
+              </span>
             </div>
 
             <div className="flex items-center justify-between p-2 bg-slate-900/60 rounded border border-slate-800">
@@ -134,7 +149,9 @@ export const TelemetryMetricsCard: React.FC<TelemetryMetricsCardProps> = ({
                 <ArrowDown className="w-3.5 h-3.5 text-emerald-400" />
                 <span>Response Inbound</span>
               </div>
-              <span className="text-emerald-400 font-bold">{(respBytes / 1024).toFixed(2)} KB ({respBytes} B)</span>
+              <span className="text-emerald-400 font-bold">
+                {respBytes !== undefined ? `${(respBytes / 1024).toFixed(2)} KB (${respBytes} B)` : 'Not Recorded'}
+              </span>
             </div>
 
             <div className="flex items-center justify-between p-2 bg-slate-900/60 rounded border border-slate-800">
@@ -142,7 +159,9 @@ export const TelemetryMetricsCard: React.FC<TelemetryMetricsCardProps> = ({
                 <Zap className="w-3.5 h-3.5 text-amber-400" />
                 <span>Effective Transfer Speed</span>
               </div>
-              <span className="text-amber-300 font-bold">{speedKbps} Kbps</span>
+              <span className="text-amber-300 font-bold">
+                {speedKbps !== undefined ? `${speedKbps} Kbps` : 'Not Recorded'}
+              </span>
             </div>
           </div>
         </div>
@@ -170,34 +189,40 @@ export const TelemetryMetricsCard: React.FC<TelemetryMetricsCardProps> = ({
           <div className="space-y-2">
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400">TLS Protocol:</span>
-              <span className="text-purple-300 font-semibold">{tlsVersion}</span>
+              <span className="text-purple-300 font-semibold">
+                {tlsVersion || (isHttps ? 'Not Recorded' : 'Plaintext HTTP')}
+              </span>
             </div>
 
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400">Cipher Suite:</span>
-              <span className="text-slate-200 font-mono break-all text-right max-w-[200px]" title={cipherSuite}>
-                {cipherSuite}
+              <span className="text-slate-200 font-mono break-all text-right max-w-[200px]" title={cipherSuite || 'Not Recorded'}>
+                {cipherSuite || (isHttps ? 'Not Recorded' : 'N/A')}
               </span>
             </div>
 
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400">ALPN Protocol:</span>
-              <span className="text-cyan-400 font-semibold">{alpn} (HTTP/2 Multiplexed)</span>
+              <span className="text-cyan-400 font-semibold">
+                {alpn ? `${alpn}${alpn === 'h2' ? ' (HTTP/2 Multiplexed)' : ''}` : 'Not Recorded'}
+              </span>
             </div>
 
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400">SNI Hostname:</span>
-              <span className="text-slate-200">{sni}</span>
+              <span className="text-slate-200">{sni || 'N/A'}</span>
             </div>
 
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400">Server Endpoint:</span>
-              <span className="text-slate-300">{serverIp}:443</span>
+              <span className="text-slate-300">
+                {serverIp ? `${serverIp}:${isHttps ? 443 : 80}` : 'Not Recorded'}
+              </span>
             </div>
 
             <div className="flex items-center justify-between text-[11px]">
               <span className="text-slate-400">Client Address:</span>
-              <span className="text-slate-300">{clientIp}</span>
+              <span className="text-slate-300">{clientIp || 'Not Recorded'}</span>
             </div>
           </div>
         </div>
@@ -214,27 +239,31 @@ export const TelemetryMetricsCard: React.FC<TelemetryMetricsCardProps> = ({
               </h4>
             </div>
             <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/30">
-              Valid & Trusted
+              {telemetry.certificate ? (telemetry.certificate.is_expired ? 'Expired' : 'Valid & Trusted') : 'Recorded TLS Flow'}
             </span>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-300">
             <div>
               <span className="text-slate-500">Subject: </span>
-              <span className="text-slate-200 font-semibold">CN={flow.host}</span>
+              <span className="text-slate-200 font-semibold">{telemetry.certificate?.subject || `CN=${flow.host}`}</span>
             </div>
             <div>
               <span className="text-slate-500">Issuer: </span>
-              <span className="text-slate-200">FlowForge Dynamic Intercept CA / Let's Encrypt</span>
+              <span className="text-slate-200">{telemetry.certificate?.issuer || 'Not Recorded'}</span>
             </div>
             <div>
               <span className="text-slate-500">Key Type: </span>
-              <span className="text-slate-200">ECDSA 256-bit (prime256v1)</span>
+              <span className="text-slate-200">
+                {telemetry.certificate?.key_algorithm 
+                  ? `${telemetry.certificate.key_algorithm} ${telemetry.certificate.key_size_bits ? `(${telemetry.certificate.key_size_bits}-bit)` : ''}` 
+                  : 'Not Recorded'}
+              </span>
             </div>
             <div>
               <span className="text-slate-500">SHA-256 Fingerprint: </span>
               <span className="text-cyan-400 font-mono text-[10px]">
-                7B:9A:32:8F:E1:92:44:19...
+                {telemetry.certificate?.fingerprint_sha256 || 'Not Recorded'}
               </span>
             </div>
           </div>

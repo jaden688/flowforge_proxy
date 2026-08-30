@@ -59,6 +59,14 @@ from flowforge.models.curation import (
     CurationImportRequest,
     CurationImportResponse,
 )
+from flowforge.models.nuclei import (
+    NucleiSeverity,
+    NucleiMatcherType,
+    NucleiMatcher,
+    NucleiHttpBlock,
+    NucleiTemplate,
+    NucleiMatchResult,
+)
 
 __all__ = [
     "FlowRecord",
@@ -109,4 +117,10 @@ __all__ = [
     "CurationExport",
     "CurationImportRequest",
     "CurationImportResponse",
+    "NucleiSeverity",
+    "NucleiMatcherType",
+    "NucleiMatcher",
+    "NucleiHttpBlock",
+    "NucleiTemplate",
+    "NucleiMatchResult",
 ]

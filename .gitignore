@@ -22,4 +22,9 @@ data/
 
 # Misc
 .agents/
+.bug-hunter/
 .DS_Store
+
+# Build artifacts & vendored data
+flowforge.zip
+flowforge/nuclei-templates/

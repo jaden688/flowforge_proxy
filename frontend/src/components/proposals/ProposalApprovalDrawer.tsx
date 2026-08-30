@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useFlowStore } from '../../store/flowStore';
 import { ProposalCard } from './ProposalCard';
 import { ProposalDiffModal } from './ProposalDiffModal';
@@ -15,7 +15,9 @@ import {
   Sparkles,
   ShieldAlert,
   Loader2,
-  AlertCircle
+  AlertCircle,
+  StopCircle,
+  Clock
 } from 'lucide-react';
 import { TestProposal } from '../../types';
 
@@ -34,6 +36,10 @@ export const ProposalApprovalDrawer: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>('PENDING');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isBatchApproving, setIsBatchApproving] = useState<boolean>(false);
+  const [batchPacingMs, setBatchPacingMs] = useState<number>(1000);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; title: string } | null>(null);
+  const abortBatchRef = useRef<boolean>(false);
+  const [isSweeping, setIsSweeping] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -129,22 +135,51 @@ export const ProposalApprovalDrawer: React.FC = () => {
   );
 
   const handleApproveAllVisible = async () => {
-    if (pendingVisibleProposals.length === 0) return;
+    if (pendingVisibleProposals.length === 0 || isBatchApproving) return;
     setIsBatchApproving(true);
     setErrorMessage(null);
+    abortBatchRef.current = false;
+
+    const total = pendingVisibleProposals.length;
+    let successCount = 0;
+
     try {
-      for (const p of pendingVisibleProposals) {
+      for (let i = 0; i < total; i++) {
+        if (abortBatchRef.current) {
+          break;
+        }
+
+        const p = pendingVisibleProposals[i];
+        setBatchProgress({
+          current: i + 1,
+          total,
+          title: `${p.method} ${p.endpoint_path}`,
+        });
+
         try {
           await approveProposal(p.id);
-        } catch (e) {
-          console.warn(`Failed proposal execution: ${p.id}`, e);
+          successCount++;
+        } catch (e: any) {
+          console.warn(`Failed proposal execution for ${p.id}:`, e);
+        }
+
+        // Paced inter-step delay unless final item or aborted
+        if (i < total - 1 && !abortBatchRef.current) {
+          await new Promise((resolve) => setTimeout(resolve, Math.max(500, batchPacingMs)));
         }
       }
     } catch (err: any) {
       setErrorMessage(err.message || 'Batch approval failed');
     } finally {
       setIsBatchApproving(false);
+      setBatchProgress(null);
     }
+  };
+
+  const handleCancelBatch = () => {
+    abortBatchRef.current = true;
+    setIsBatchApproving(false);
+    setBatchProgress(null);
   };
 
   const handleDismissAllVisible = () => {
@@ -152,6 +187,26 @@ export const ProposalApprovalDrawer: React.FC = () => {
       dismissAllProposals(activeProposalFlowId);
     } else {
       dismissAllProposals();
+    }
+  };
+
+  const sweepProposalsToIntruder = useFlowStore((s) => s.sweepProposalsToIntruder);
+
+  const handleSweepAll = async () => {
+    setIsSweeping(true);
+    setErrorMessage(null);
+    try {
+      const result = await sweepProposalsToIntruder({
+        min_confidence: 60,
+        max_proposals: 20,
+      });
+      if (!result?.ok) {
+        setErrorMessage(result?.error || 'Sweep failed');
+      }
+    } catch (err: any) {
+      setErrorMessage(err.message || 'Sweep failed');
+    } finally {
+      setIsSweeping(false);
     }
   };
 
@@ -296,35 +351,78 @@ export const ProposalApprovalDrawer: React.FC = () => {
         </div>
 
         {/* Batch Actions Bar */}
-        <div className="px-4 py-2.5 bg-[#0A0E17] border-b border-border flex items-center justify-between gap-2">
-          <span className="text-[11px] text-slate-400">
-            Showing <strong className="text-slate-200">{filteredProposals.length}</strong> proposals
-            {pendingVisibleProposals.length > 0 && (
-              <span> (<strong className="text-amber-300">{pendingVisibleProposals.length}</strong> ready to run)</span>
-            )}
-          </span>
+        <div className="px-4 py-2.5 bg-[#0A0E17] border-b border-border flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-slate-400">
+              Showing <strong className="text-slate-200">{filteredProposals.length}</strong> proposals
+              {pendingVisibleProposals.length > 0 && (
+                <span> (<strong className="text-amber-300">{pendingVisibleProposals.length}</strong> ready to run)</span>
+              )}
+            </span>
+
+            {/* Pacing Speed Selector for Batch Execution */}
+            <div className="flex items-center gap-1 bg-slate-900 border border-slate-700 rounded px-2 py-0.5 text-[10px] text-slate-400">
+              <Clock className="w-3 h-3 text-cyan-400" />
+              <span>Delay:</span>
+              <select
+                value={batchPacingMs}
+                onChange={(e) => setBatchPacingMs(Number(e.target.value))}
+                disabled={isBatchApproving}
+                className="bg-slate-950 border border-slate-700 text-cyan-300 rounded px-1 py-0.2 font-mono font-bold focus:outline-none"
+              >
+                <option value={500}>500ms</option>
+                <option value={1000}>1000ms</option>
+                <option value={2000}>2000ms</option>
+                <option value={5000}>5000ms</option>
+              </select>
+            </div>
+          </div>
 
           <div className="flex items-center gap-2">
             {pendingVisibleProposals.length > 0 && (
               <button
-                onClick={handleApproveAllVisible}
-                disabled={isBatchApproving}
-                className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/20"
-                title="Approve and execute all visible staged proposals"
+                onClick={handleSweepAll}
+                disabled={isSweeping || isBatchApproving}
+                className="px-3 py-1 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white font-bold text-[11px] flex items-center gap-1.5 transition-all shadow-md shadow-violet-600/20"
+                title="Launch Intruder campaigns for all high-confidence staged proposals"
               >
-                {isBatchApproving ? (
+                {isSweeping ? (
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 ) : (
-                  <CheckCheck className="w-3.5 h-3.5" />
+                  <Zap className="w-3.5 h-3.5" />
                 )}
-                <span>Approve All Visible</span>
+                <span>Sweep All to Intruder</span>
               </button>
+            )}
+
+            {isBatchApproving ? (
+              <button
+                onClick={handleCancelBatch}
+                className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-[11px] flex items-center gap-1.5 transition-all shadow-md shadow-rose-600/20 animate-pulse"
+                title="Cancel batch execution in progress"
+              >
+                <StopCircle className="w-3.5 h-3.5" />
+                <span>Cancel Batch</span>
+              </button>
+            ) : (
+              pendingVisibleProposals.length > 0 && (
+                <button
+                  onClick={handleApproveAllVisible}
+                  disabled={isBatchApproving}
+                  className="px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] flex items-center gap-1.5 transition-all shadow-md shadow-emerald-600/20"
+                  title="Approve and execute all visible staged proposals with pacing"
+                >
+                  <CheckCheck className="w-3.5 h-3.5" />
+                  <span>Approve All Visible ({pendingVisibleProposals.length})</span>
+                </button>
+              )
             )}
 
             {filteredProposals.length > 0 && (
               <button
                 onClick={handleDismissAllVisible}
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-[11px] flex items-center gap-1 transition-colors"
+                disabled={isBatchApproving}
+                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-rose-500/20 disabled:opacity-50 text-slate-400 hover:text-rose-300 border border-slate-700 hover:border-rose-500/40 text-[11px] flex items-center gap-1 transition-colors"
                 title="Dismiss all matching proposals"
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -333,6 +431,21 @@ export const ProposalApprovalDrawer: React.FC = () => {
             )}
           </div>
         </div>
+
+        {/* Live Batch Execution Progress Indicator */}
+        {batchProgress && (
+          <div className="px-4 py-2.5 bg-emerald-950/40 border-b border-emerald-500/30 flex items-center justify-between text-[11px] text-emerald-300">
+            <div className="flex items-center gap-2 truncate">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400 shrink-0" />
+              <span className="truncate">
+                Executing <strong>{batchProgress.current}</strong> of <strong>{batchProgress.total}</strong>: <code className="text-emerald-200 bg-emerald-950/60 px-1 py-0.5 rounded border border-emerald-500/30 font-bold">{batchProgress.title}</code>
+              </span>
+            </div>
+            <span className="font-bold text-[10px] bg-emerald-900/60 px-2 py-0.5 rounded border border-emerald-500/40 text-emerald-200 shrink-0 ml-2">
+              {Math.round((batchProgress.current / batchProgress.total) * 100)}%
+            </span>
+          </div>
+        )}
 
         {/* Error message */}
         {errorMessage && (

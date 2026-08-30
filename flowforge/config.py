@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # Proxy Engine Settings
     proxy_host: str = "127.0.0.1"
-    proxy_port: int = 8080
+    proxy_port: int = 8081
     auto_start_proxy: bool = True
     ssl_insecure: bool = True
     upstream_proxy: Optional[str] = None

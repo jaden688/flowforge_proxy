@@ -46,6 +46,7 @@ const OPERATOR_OPTIONS: { value: MatchOperator; label: string }[] = [
   { value: 'equals', label: 'Equals (equals)' },
   { value: 'not_equals', label: 'Not Equals (not_equals)' },
   { value: 'regex', label: 'Matches Regex (regex)' },
+  { value: 'not_regex', label: 'Does Not Match Regex (not_regex)' },
   { value: 'starts_with', label: 'Starts With (starts_with)' },
   { value: 'ends_with', label: 'Ends With (ends_with)' },
   { value: 'gt', label: 'Greater Than > (gt)' },
